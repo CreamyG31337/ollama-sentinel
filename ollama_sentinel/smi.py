@@ -4,7 +4,24 @@ from __future__ import annotations
 
 import subprocess
 from typing import Any
+import sys
 
+
+
+def _no_window() -> dict:
+    """Keep nvidia-smi from flashing a console window.
+
+    Under pythonw (tray/GUI mode) every subprocess without CREATE_NO_WINDOW
+    pops a visible console. At the default 5s poll interval that is a window
+    flashing every five seconds, which makes tray mode unusable.
+    """
+    if sys.platform != "win32":
+        return {}
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = subprocess.SW_HIDE
+    return {"creationflags": flags, "startupinfo": si}
 
 def _parse_float(value: str) -> float | None:
     value = value.strip()
@@ -49,7 +66,9 @@ def query_gpus(gpu_filter: int | None = None) -> list[dict[str, Any]] | None:
         "--format=csv,noheader,nounits",
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15, **_no_window()
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if result.returncode != 0:

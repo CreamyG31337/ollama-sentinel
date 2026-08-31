@@ -131,10 +131,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = resolve_config(args)
 
-    if args.gui or args.tray:
+    if args.gui or args.tray or args.tray_only:
         from ollama_sentinel.ui import run_gui
 
-        run_gui(cfg, tray=args.tray)
+        run_gui(cfg, tray=args.tray or args.tray_only,
+                start_hidden=args.tray_only)
         return 0
 
     if args.command == "search":

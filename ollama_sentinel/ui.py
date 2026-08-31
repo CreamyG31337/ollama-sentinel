@@ -18,17 +18,53 @@ from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
 
 
-def run_gui(cfg: AppConfig, *, tray: bool = False) -> None:
-    if tray:
-        from ollama_sentinel.tray import start_tray
-
-        start_tray(on_open=lambda: None)
+def run_gui(cfg: AppConfig, *, tray: bool = False, start_hidden: bool = False) -> None:
+    # Holds the pystray icon so refresh() can recolour it. Created inside app()
+    # because its menu callbacks need the live `page`.
+    tray_icon: dict = {"icon": None}
 
     def app(page: ft.Page) -> None:
         page.title = "ollama-sentinel"
         page.theme_mode = ft.ThemeMode.DARK
         page.window.width = 960
         page.window.height = 640
+
+        if tray:
+            from ollama_sentinel.tray import start_tray
+
+            def show_window() -> None:
+                page.window.visible = True
+                page.window.skip_task_bar = False
+                page.window.minimized = False
+                page.window.to_front()
+                page.update()
+
+            def hide_window() -> None:
+                page.window.visible = False
+                page.window.skip_task_bar = True
+                page.update()
+
+            def quit_app() -> None:
+                icon = tray_icon.get("icon")
+                if icon is not None:
+                    icon.stop()
+                page.window.prevent_close = False
+                page.window.destroy()
+
+            # Closing the window hides to tray instead of killing the process --
+            # otherwise the tray icon outlives the app that owns it.
+            page.window.prevent_close = True
+
+            def on_window_event(e) -> None:
+                if getattr(e, "data", None) == "close":
+                    hide_window()
+
+            page.window.on_event = on_window_event
+            tray_icon["icon"] = start_tray(on_open=show_window, on_quit=quit_app)
+
+            if start_hidden:
+                page.window.visible = False
+                page.window.skip_task_bar = True
 
         servers = selected_servers(cfg)
         server_names = [s.name for s in servers]
@@ -58,6 +94,17 @@ def run_gui(cfg: AppConfig, *, tray: bool = False) -> None:
             state = load_state(cfg.state_file)
             active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
             save_state(cfg.state_file, new_state)
+
+            # Recolour the tray icon -- green/red at a glance is the whole point
+            # of having one.
+            icon = tray_icon.get("icon")
+            if icon is not None:
+                from ollama_sentinel.tray import set_tray_color
+
+                try:
+                    set_tray_color(icon, active)
+                except Exception:
+                    pass
 
             if not snap.get("reachable"):
                 status_text.value = f"Unreachable: {snap.get('error')}"

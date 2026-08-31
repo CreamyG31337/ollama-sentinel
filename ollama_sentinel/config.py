@@ -135,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ollama-url", help="Default Ollama URL")
     p.add_argument("--gui", action="store_true", help="Open Flet window")
     p.add_argument("--tray", action="store_true", help="Open Flet window + tray icon")
+    p.add_argument("--tray-only", action="store_true",
+                   help="Tray icon only; start hidden, open from the tray menu")
     sub = p.add_subparsers(dest="command")
     sp = sub.add_parser("search", help="Search Hugging Face")
     sp.add_argument("query", nargs="?", default="")
