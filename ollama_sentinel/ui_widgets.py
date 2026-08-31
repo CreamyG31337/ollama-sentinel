@@ -8,6 +8,7 @@ import flet as ft
 
 from ollama_sentinel.alarms import format_expires, gpu_pct
 from ollama_sentinel.activity import ServerActivity, model_detail_line
+from ollama_sentinel.catalog import format_count, summarize_list_item
 from ollama_sentinel.telemetry import format_bytes_gb, format_field, format_throttle
 
 PALETTE = {
@@ -371,3 +372,186 @@ def library_table(
         horizontal_margin=8,
     )
     return table
+
+
+def discover_result_tile(
+    item: dict[str, Any],
+    *,
+    detail: dict[str, Any] | None = None,
+    detail_error: str | None = None,
+    detail_loading: bool = False,
+    expanded: bool = False,
+    on_pull: Callable[[str], None],
+    on_open_hf: Callable[[], None],
+    on_expand_change: Callable[[Any], None] | None = None,
+) -> ft.Control:
+    subtitle = item.get("summary") or summarize_list_item(item)
+    detail_controls = _discover_detail_controls(
+        detail,
+        detail_error=detail_error,
+        detail_loading=detail_loading,
+        on_pull=on_pull,
+        on_open_hf=on_open_hf,
+    )
+
+    return ft.Card(
+        content=ft.Container(
+            content=ft.ExpansionTile(
+                title=ft.Text(item.get("id") or "?", weight=ft.FontWeight.W_500, size=13),
+                subtitle=ft.Text(subtitle, size=11, color=PALETTE["muted"]),
+                expanded=expanded,
+                maintain_state=True,
+                on_change=on_expand_change,
+                controls=detail_controls,
+                controls_padding=ft.Padding(left=12, right=12, bottom=12),
+                trailing=ft.OutlinedButton(
+                    "Install",
+                    on_click=lambda e, name=item.get("pull_name", ""): on_pull(name),
+                    style=ft.ButtonStyle(padding=ft.Padding(left=10, right=10, top=4, bottom=4)),
+                ),
+            ),
+            padding=ft.Padding(left=4, right=4, top=4, bottom=4),
+        ),
+        elevation=1,
+    )
+
+
+def _discover_detail_controls(
+    detail: dict[str, Any] | None,
+    *,
+    detail_error: str | None,
+    detail_loading: bool,
+    on_pull: Callable[[str], None],
+    on_open_hf: Callable[[], None],
+) -> list[ft.Control]:
+    if detail_loading:
+        return [
+            ft.Row(
+                [
+                    ft.ProgressRing(width=16, height=16, stroke_width=2),
+                    ft.Text("Loading model details and README…", size=12, color=PALETTE["muted"]),
+                ],
+                spacing=8,
+            )
+        ]
+    if detail_error:
+        return [ft.Text(detail_error, size=12, color=PALETTE["alarm"])]
+    if detail is None:
+        return [ft.Text("Expand for README, GGUF quants, context, and license.", size=12, color=PALETTE["muted"])]
+
+    controls: list[ft.Control] = []
+    facts: list[str] = []
+    if detail.get("architecture"):
+        facts.append(f"arch {detail['architecture']}")
+    ctx = detail.get("context_length")
+    if ctx:
+        facts.append(f"context {int(ctx):,}")
+    if detail.get("license"):
+        facts.append(str(detail["license"]))
+    if detail.get("base_model"):
+        facts.append(f"base {detail['base_model']}")
+    if facts:
+        controls.append(ft.Text(" · ".join(facts), size=12))
+
+    meta: list[str] = []
+    if detail.get("downloads") is not None:
+        meta.append(f"{format_count(detail.get('downloads'))} downloads")
+    if detail.get("likes"):
+        meta.append(f"{format_count(detail.get('likes'))} likes")
+    if detail.get("last_modified"):
+        meta.append(f"updated {str(detail['last_modified'])[:10]}")
+    if meta:
+        controls.append(ft.Text(" · ".join(meta), size=11, color=PALETTE["muted"]))
+
+    readme = detail.get("readme")
+    if readme:
+        controls.append(ft.Text("README", size=12, weight=ft.FontWeight.W_500))
+        controls.append(
+            ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Markdown(
+                            readme,
+                            selectable=True,
+                            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                        )
+                    ],
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                height=260,
+                border=ft.border.all(1, ft.Colors.with_opacity(0.25, ft.Colors.GREY_500)),
+                border_radius=6,
+                padding=8,
+            )
+        )
+    elif "readme" in detail:
+        controls.append(
+            ft.Text(
+                "No README.md in repo (or not accessible without HF login).",
+                size=11,
+                color=PALETTE["muted"],
+            )
+        )
+
+    if detail.get("gated"):
+        controls.append(
+            ft.Text("Gated on Hugging Face — pull may require HF_TOKEN.", size=11, color=PALETTE["warn"])
+        )
+
+    sample_bytes = detail.get("gguf_total_bytes")
+    if sample_bytes:
+        controls.append(
+            ft.Text(f"Reference size ~{format_bytes_gb(int(sample_bytes))}", size=11, color=PALETTE["muted"])
+        )
+
+    variants = detail.get("variants") or []
+    if variants:
+        controls.append(ft.Text("Quant files", size=12, weight=ft.FontWeight.W_500))
+        for variant in variants[:14]:
+            pull_name = variant.get("pull_name") or ""
+            controls.append(
+                ft.Row(
+                    [
+                        ft.Text(variant.get("filename") or "?", size=11, expand=True),
+                        ft.OutlinedButton(
+                            "Install",
+                            on_click=lambda e, name=pull_name: on_pull(name),
+                            style=ft.ButtonStyle(
+                                padding=ft.Padding(left=10, right=10, top=2, bottom=2),
+                            ),
+                        ),
+                    ],
+                    spacing=8,
+                )
+            )
+        if len(variants) > 14:
+            controls.append(
+                ft.Text(
+                    f"+ {len(variants) - 14} more files on Hugging Face",
+                    size=11,
+                    color=PALETTE["muted"],
+                )
+            )
+    else:
+        controls.append(
+            ft.Text(
+                "No .gguf filenames listed — use default Install or open on Hugging Face.",
+                size=11,
+                color=PALETTE["muted"],
+            )
+        )
+
+    default_pull = detail.get("pull_name")
+    if default_pull:
+        controls.append(
+            ft.Row(
+                [
+                    ft.Text(f"Default: {default_pull}", size=11, color=PALETTE["muted"], expand=True),
+                    ft.TextButton("Install default", on_click=lambda e, name=default_pull: on_pull(name)),
+                ],
+                spacing=8,
+            )
+        )
+
+    controls.append(ft.TextButton("Open on Hugging Face", icon=ft.Icons.OPEN_IN_NEW, on_click=lambda _: on_open_hf()))
+    return controls

@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
     sp = sub.add_parser("search", help="Search Hugging Face")
     sp.add_argument("query", nargs="?", default="")
-    sp.add_argument("--sort", default="trendingScore", help="Hub sort field")
+    sp.add_argument("--sort", default="trendingScore", help="Hub sort: trendingScore, downloads, likes, lastModified, createdAt")
     sp.add_argument("--limit", type=int, default=20)
     pp = sub.add_parser("pull", help="Pull model to a server")
     pp.add_argument("model", help="Model name or hf.co/...")

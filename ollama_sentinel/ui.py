@@ -13,7 +13,7 @@ import flet as ft
 from ollama_sentinel.metrics import make_metrics_store
 from ollama_sentinel.activity import build_server_activity
 from ollama_sentinel.alarms import evaluate_alarms
-from ollama_sentinel.catalog import search_models
+from ollama_sentinel.catalog import SEARCH_SORTS, fetch_model_bundle, search_models
 from ollama_sentinel.config import AppConfig, selected_servers
 from ollama_sentinel.doctor import (
     collect_doctor_inputs,
@@ -23,6 +23,7 @@ from ollama_sentinel.doctor import (
 from ollama_sentinel.instance import InstanceLock
 from ollama_sentinel.inventory import build_inventory, inventory_summary
 from ollama_sentinel.poll import poll_all
+from ollama_sentinel.pull import pull_model
 from ollama_sentinel.proc_vram import ProcessVramCollector
 from ollama_sentinel.restart import spawn_restart
 from ollama_sentinel.unload import unload_models
@@ -36,6 +37,7 @@ from ollama_sentinel.ui_widgets import (
     PALETTE,
     activity_card,
     alarm_banner,
+    discover_result_tile,
     gpu_table,
     library_table,
     loaded_models_table,
@@ -241,8 +243,22 @@ def run_gui(
         library_host = ft.Column(spacing=8, expand=True)
         charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
         chart_window_s = {"value": 300.0}
-        discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-        search_field = ft.TextField(label="Search Hugging Face", expand=True)
+        discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
+        discover_state: dict[str, Any] = {
+            "sort": "trendingScore",
+            "expanded_id": None,
+            "last_results": [],
+            "detail_cache": {},
+            "detail_errors": {},
+            "detail_loading": set(),
+        }
+        discover_sort = ft.Dropdown(
+            label="Sort by",
+            width=180,
+            value="trendingScore",
+            options=[ft.dropdown.Option(key, label) for key, label in SEARCH_SORTS],
+        )
+        search_field = ft.TextField(label="Search Hugging Face", expand=True, autofocus=True)
         pull_status = ft.Text("")
         unload_status = ft.Text("")
 
@@ -543,55 +559,118 @@ def run_gui(
             update_charts()
             page.update()
 
-        def do_search(_=None) -> None:
-            q = search_field.value or ""
-            results = search_models(q, token=cfg.hf_token) if len(q) >= 2 else search_models("", token=cfg.hf_token)
-            discover_col.controls.clear()
-            for r in results[:20]:
-                model = r["pull_name"]
+        def request_pull(model_name: str) -> None:
+            srv = get_server_cfg()
+            pull_status.value = f"Pulling {model_name}…"
+            page.update()
 
-                def make_pull(m=model):
-                    def handler(_e):
-                        srv = get_server_cfg()
-                        pull_status.value = f"Pulling {m}…"
+            def worker() -> None:
+                for ev in pull_model(srv.url, model_name):
+                    if "error" in ev:
+                        pull_status.value = ev["error"]
                         page.update()
+                        return
+                    pull_status.value = str(ev.get("status") or ev)
+                    page.update()
+                pull_status.value = f"Done: {model_name}"
+                page.update()
+                refresh()
 
-                        def worker():
-                            for ev in pull_model(srv.url, m):
-                                if "error" in ev:
-                                    pull_status.value = ev["error"]
-                                    page.update()
-                                    return
-                                pull_status.value = str(ev.get("status") or ev)
-                                page.update()
-                            pull_status.value = f"Done: {m}"
-                            page.update()
-                            refresh()
+            threading.Thread(target=worker, daemon=True).start()
 
-                        threading.Thread(target=worker, daemon=True).start()
+        def render_discover_results(results: list[dict[str, Any]]) -> None:
+            discover_col.controls.clear()
+            if not results:
+                discover_col.controls.append(
+                    ft.Text("No models found.", size=12, color=PALETTE["muted"])
+                )
+                return
+            for item in results:
+                model_id = item.get("id") or ""
+
+                def make_expand_handler(mid: str = model_id):
+                    def handler(e) -> None:
+                        if e.control.expanded:
+                            discover_state["expanded_id"] = mid
+                            load_detail_if_needed(mid)
+                        elif discover_state.get("expanded_id") == mid:
+                            discover_state["expanded_id"] = None
 
                     return handler
 
                 discover_col.controls.append(
-                    ft.Card(
-                        content=ft.Container(
-                            content=ft.Row(
-                                [
-                                    ft.Column(
-                                        [
-                                            ft.Text(r["id"], weight=ft.FontWeight.BOLD),
-                                            ft.Text(f"downloads: {r.get('downloads') or '—'}", size=12),
-                                        ],
-                                        expand=True,
-                                    ),
-                                    ft.ElevatedButton("Install", on_click=make_pull()),
-                                ]
-                            ),
-                            padding=12,
-                        )
+                    discover_result_tile(
+                        item,
+                        detail=discover_state["detail_cache"].get(model_id),
+                        detail_error=discover_state["detail_errors"].get(model_id),
+                        detail_loading=model_id in discover_state["detail_loading"],
+                        expanded=discover_state.get("expanded_id") == model_id,
+                        on_pull=request_pull,
+                        on_open_hf=lambda url=item.get("hf_url", ""): page.launch_url(url),
+                        on_expand_change=make_expand_handler(),
                     )
                 )
+
+        def load_detail_if_needed(model_id: str) -> None:
+            if model_id in discover_state["detail_cache"]:
+                render_discover_results(discover_state.get("last_results") or [])
+                page.update()
+                return
+            if model_id in discover_state["detail_loading"]:
+                return
+            discover_state["detail_loading"].add(model_id)
+            render_discover_results(discover_state.get("last_results") or [])
             page.update()
+
+            def worker() -> None:
+                try:
+                    discover_state["detail_cache"][model_id] = fetch_model_bundle(
+                        model_id,
+                        token=cfg.hf_token,
+                    )
+                    discover_state["detail_errors"].pop(model_id, None)
+                except Exception as exc:
+                    discover_state["detail_errors"][model_id] = str(exc)
+                finally:
+                    discover_state["detail_loading"].discard(model_id)
+                render_discover_results(discover_state.get("last_results") or [])
+                page.update()
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def do_search(_=None) -> None:
+            query = search_field.value or ""
+            sort = discover_sort.value or discover_state["sort"]
+            discover_state["sort"] = sort
+            pull_status.value = "Searching…"
+            page.update()
+
+            def worker() -> None:
+                try:
+                    if len(query.strip()) >= 2:
+                        results = search_models(
+                            query.strip(),
+                            sort=sort,
+                            limit=20,
+                            token=cfg.hf_token,
+                        )
+                    else:
+                        results = search_models("", sort=sort, limit=20, token=cfg.hf_token)
+                    discover_state["last_results"] = results
+                    pull_status.value = f"{len(results)} result{'s' if len(results) != 1 else ''}"
+                except Exception as exc:
+                    discover_state["last_results"] = []
+                    pull_status.value = str(exc)
+                render_discover_results(discover_state.get("last_results") or [])
+                page.update()
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def on_discover_sort_change(e) -> None:
+            do_search()
+
+        discover_sort.on_change = on_discover_sort_change
+        search_field.on_submit = do_search
 
         unload_all_btn = ft.OutlinedButton(
             "Unload all",
@@ -640,10 +719,23 @@ def run_gui(
             spacing=10,
         )
         library_page = ft.Column([library_host, action_row], expand=True, spacing=10)
+        discover_search_row = ft.Row(
+            [
+                search_field,
+                ft.ElevatedButton("Search", on_click=do_search),
+                discover_sort,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        )
         discover_page = ft.Column(
-            [search_field, ft.ElevatedButton("Search", on_click=do_search), pull_status, discover_col],
+            [
+                discover_search_row,
+                pull_status,
+                discover_col,
+            ],
             expand=True,
-            spacing=10,
+            spacing=8,
         )
         pages = [status_page, charts_page, library_page, discover_page]
 
@@ -680,6 +772,7 @@ def run_gui(
         body = ft.Row([nav, ft.VerticalDivider(width=1), content_area], expand=True)
         page.add(body)
         refresh()
+        do_search()
 
         def poll_loop():
             while True:

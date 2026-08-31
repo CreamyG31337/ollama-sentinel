@@ -208,19 +208,23 @@ def cmd_search(args, cfg) -> int:
     from rich.console import Console
     from rich.table import Table
 
+    from ollama_sentinel.catalog import SEARCH_SORTS, summarize_list_item
+
     query = getattr(args, "query", "") or ""
+    sort = getattr(args, "sort", "trendingScore")
     results = search_models(
         query,
-        sort=getattr(args, "sort", "trendingScore"),
+        sort=sort,
         limit=getattr(args, "limit", 20),
         token=cfg.hf_token,
     )
-    table = Table(title=f"HF search: {query or '(trending)'}")
+    sort_label = dict(SEARCH_SORTS).get(sort, sort)
+    table = Table(title=f"HF search: {query or '(trending)'} · sort={sort_label}")
     table.add_column("Model")
+    table.add_column("Summary")
     table.add_column("Pull as")
-    table.add_column("Downloads")
     for r in results:
-        table.add_row(r["id"], r["pull_name"], str(r.get("downloads") or "—"))
+        table.add_row(r["id"], r.get("summary") or summarize_list_item(r), r["pull_name"])
     Console().print(table)
     return 0
 
