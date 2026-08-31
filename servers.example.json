@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "local",
+      "url": "http://127.0.0.1:11434",
+      "local_gpu": true
+    },
+    {
+      "name": "other",
+      "url": "http://127.0.0.1:11435",
+      "local_gpu": false
+    }
+  ]
+}

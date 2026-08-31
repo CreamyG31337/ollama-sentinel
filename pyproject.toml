@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-sentinel"
+version = "0.1.0"
+description = "Ollama GPU spill / paging / VRAM companion with HF discover"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "CreamyG31337" }]
+dependencies = [
+  "rich>=13.7,<14",
+]
+
+[project.optional-dependencies]
+windows = ["win11toast>=0.35,<1"]
+gui = ["flet>=0.24,<1", "pystray>=0.19,<1", "Pillow>=10,<12"]
+
+[project.scripts]
+ollama-sentinel = "ollama_sentinel.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ollama_sentinel*"]
+
+[tool.setuptools.package-data]
+ollama_sentinel = ["py.typed"]

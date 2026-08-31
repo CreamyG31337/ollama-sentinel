@@ -1,0 +1,7 @@
+Read AGENTS.md in this folder first — it holds the host facts (GPU, Ollama version, Python path)
+and two environment traps that will otherwise cost you debugging time.
+
+PROMPT.md is the full build spec for this tool. Follow it; it was written from measured values on
+the target machine, not assumptions.
+
+The parent folder C:\Projects also has an AGENTS.md with workspace-wide conventions.

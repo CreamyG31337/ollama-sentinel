@@ -1,0 +1,7 @@
+rich>=13.7,<14
+
+# Optional (install with pip install -e ".[windows,gui]")
+# win11toast>=0.35,<1
+# flet>=0.24,<1
+# pystray>=0.19,<1
+# Pillow>=10,<12
