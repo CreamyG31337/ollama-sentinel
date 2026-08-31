@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+
+from ollama_sentinel.telemetry import format_expires_display
 
 
 @dataclass
@@ -28,12 +31,13 @@ class AlarmState:
     active_ids: set[str] = field(default_factory=set)
 
 
-def format_expires(expires_at: str | None) -> str:
-    if not expires_at:
-        return "—"
-    if expires_at[:4].isdigit() and int(expires_at[:4]) >= 2100:
-        return "Forever"
-    return expires_at
+def format_expires(
+    expires_at: str | None,
+    *,
+    server_url: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    return format_expires_display(expires_at, server_url=server_url, now=now)
 
 
 def gpu_pct(size: int, size_vram: int) -> int:

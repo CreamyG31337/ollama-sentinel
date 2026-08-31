@@ -21,12 +21,23 @@ from ollama_sentinel.pull import pull_model
 from ollama_sentinel.render import LiveRenderer, render_list_table, render_snapshot_plain
 from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
+from ollama_sentinel.doctor import (
+    DoctorFinding,
+    collect_doctor_inputs,
+    evaluate_doctor_alarms,
+    findings_exit_code,
+    run_doctor,
+)
+from ollama_sentinel.doctor_win import kill_orphan_pids
+from ollama_sentinel.unload import unload_model, unload_models
 
 
 def _evaluate_all(
     snapshots: list[dict[str, Any]],
     state: AlarmState,
     thresholds,
+    *,
+    doctor_findings: list[DoctorFinding] | None = None,
 ) -> tuple[list[dict[str, Any]], AlarmState, list]:
     from ollama_sentinel.alarms import AlarmTransition
 
@@ -38,6 +49,9 @@ def _evaluate_all(
         all_active.extend(active)
         streak = new_partial.paging_streak
 
+    if doctor_findings:
+        all_active.extend(evaluate_doctor_alarms(doctor_findings))
+
     final_ids = {a["id"] for a in all_active}
     transitions = []
     for aid in final_ids - state.active_ids:
@@ -48,6 +62,46 @@ def _evaluate_all(
 
     new_state = AlarmState(paging_streak=streak, active_ids=final_ids)
     return all_active, new_state, transitions
+
+
+def _doctor_findings_for_snapshots(
+    snapshots: list[dict[str, Any]],
+    cfg,
+    *,
+    proc_rows: list[dict[str, Any]] | None = None,
+) -> list[DoctorFinding]:
+    """Run Check A/B (and full doctor when inputs available) for local_gpu snaps."""
+    if sys.platform != "win32":
+        return []
+    local = [s for s in snapshots if s.get("reachable")]
+    servers = {s.name: s for s in selected_servers(cfg)}
+    findings: list[DoctorFinding] = []
+    try:
+        inputs = collect_doctor_inputs()
+    except Exception:
+        return []
+    for snap in local:
+        srv = servers.get(snap.get("server"))
+        if srv is not None and not srv.local_gpu:
+            continue
+        # Default single-server local_gpu=True when no servers.json entry match
+        if srv is None and snap.get("server") not in (None, "local"):
+            continue
+        findings.extend(
+            run_doctor(
+                snap,
+                registry=inputs["registry"],
+                log_cfg=inputs["log_cfg"],
+                log_path=inputs["log_path"],
+                runners=inputs["runners"],
+                proc_rows=proc_rows,
+                ollama_url=cfg.ollama_url,
+                registry_mtime=inputs["registry_mtime"],
+                restart_remedy=inputs["restart_remedy"],
+            )
+        )
+        break  # one local doctor pass per cycle
+    return findings
 
 
 def _proc_vram_enabled(cfg) -> bool:
@@ -180,6 +234,135 @@ def cmd_pull(args, cfg) -> int:
     return 0
 
 
+def cmd_unload(args, cfg) -> int:
+    servers = {s.name: s for s in cfg.servers}
+    srv_name = args.server
+    if srv_name not in servers:
+        print(f"Unknown server: {srv_name}", file=sys.stderr)
+        return 2
+    srv = servers[srv_name]
+
+    if args.all:
+        snap = poll_all(
+            [{"name": srv.name, "url": srv.url, "local_gpu": srv.local_gpu}],
+            gpu_filter=cfg.gpu_filter,
+            query_gpus_fn=query_gpus,
+        )[0]
+        names = [m.get("name") for m in snap.get("models") or [] if m.get("name")]
+        if not names:
+            print("No loaded models")
+            return 0
+        target = ", ".join(names)
+        prompt = f"Unload all loaded models on {srv_name}? ({target})"
+    else:
+        if not args.model:
+            print("Provide a model name or use --all", file=sys.stderr)
+            return 2
+        names = [args.model]
+        prompt = f"Unload {args.model} from {srv_name}?"
+
+    if not args.yes:
+        ans = input(f"{prompt} [y/N] ").strip().lower()
+        if ans != "y":
+            return 0
+
+    results = unload_models(srv.url, names)
+    exit_code = 0
+    for result in results:
+        model = result.get("model", "?")
+        if result.get("error"):
+            print(f"{model}: {result['error']}", file=sys.stderr)
+            exit_code = 2
+        else:
+            reason = result.get("done_reason") or "done"
+            print(f"{model}: {reason}")
+    return exit_code
+
+
+def cmd_doctor(args, cfg) -> int:
+    servers = {s.name: s for s in cfg.servers}
+    srv_name = args.server
+    if srv_name not in servers:
+        print(f"Unknown server: {srv_name}", file=sys.stderr)
+        return 2
+    srv = servers[srv_name]
+    if not srv.local_gpu:
+        print("doctor only supports local_gpu servers", file=sys.stderr)
+        return 2
+
+    snap = poll_all(
+        [{"name": srv.name, "url": srv.url, "local_gpu": srv.local_gpu}],
+        gpu_filter=cfg.gpu_filter,
+        query_gpus_fn=query_gpus,
+    )[0]
+    proc_rows: list[dict[str, Any]] = []
+    if _proc_vram_enabled(cfg):
+        try:
+            proc_rows = query_process_vram(min_bytes=cfg.proc_vram_min_mb * 1024 * 1024)
+        except Exception:
+            proc_rows = []
+
+    inputs = collect_doctor_inputs()
+    findings = run_doctor(
+        snap,
+        registry=inputs["registry"],
+        log_cfg=inputs["log_cfg"],
+        log_path=inputs["log_path"],
+        runners=inputs["runners"],
+        proc_rows=proc_rows,
+        ollama_url=cfg.ollama_url,
+        registry_mtime=inputs["registry_mtime"],
+        restart_remedy=inputs["restart_remedy"],
+    )
+    exit_code = findings_exit_code(findings)
+
+    if args.json:
+        print(
+            json.dumps(
+                {"findings": [f.to_dict() for f in findings], "exit_code": exit_code},
+                indent=2,
+            )
+        )
+    else:
+        for f in findings:
+            label = f.severity.upper()
+            print(f"{label:7} {f.id}")
+            print(f"        {f.message}")
+            if f.remedy and f.severity in ("warn", "fail"):
+                for line in f.remedy.strip().splitlines():
+                    print(f"        remedy: {line}")
+        needs_restart = any(
+            f.id.startswith("config:drift:") and f.severity == "warn"
+            or f.id == "config:footgun:stale_env"
+            for f in findings
+        )
+        if needs_restart and inputs.get("restart_remedy"):
+            print("\n--- Restart remedy (copy-paste) ---")
+            print(inputs["restart_remedy"])
+
+    if args.fix_orphans:
+        orphan_pids = [
+            int(f.id.rsplit(":", 1)[-1])
+            for f in findings
+            if f.check == "orphan" and f.severity == "warn" and f.id.startswith("runner:orphan:")
+        ]
+        if orphan_pids:
+            if not args.yes:
+                ans = input(f"Kill orphan PIDs {orphan_pids}? [y/N] ").strip().lower()
+                if ans != "y":
+                    return exit_code
+            for row in kill_orphan_pids(orphan_pids):
+                if row.get("ok"):
+                    print(f"Killed pid {row['pid']}")
+                else:
+                    print(f"Failed pid {row['pid']}: {row.get('error')}", file=sys.stderr)
+                    exit_code = max(exit_code, 2)
+        elif not args.json:
+            print("No orphan PIDs to fix")
+
+    return exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -205,14 +388,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "pull":
         return cmd_pull(args, cfg)
 
+    if args.command == "unload":
+        return cmd_unload(args, cfg)
+
+    if args.command == "doctor":
+        return cmd_doctor(args, cfg)
+
     state_path = cfg.state_file or Path("state.json")
     state = load_state(state_path)
     once_mode = args.once or args.json or args.list
     proc_collector = _make_proc_collector(cfg) if not once_mode else None
 
+    def _doctor_proc_rows():
+        block = _process_vram_payload(proc_collector, cfg, sync=once_mode)
+        if not block:
+            return None
+        return block.get("rows") or []
+
     def cycle(last_snapshots=None):
         snapshots = _poll(cfg, last_snapshots=last_snapshots)
-        active, new_state, transitions = _evaluate_all(snapshots, state, cfg.thresholds)
+        # Passive doctor (A+B mapped to alarms) — do not affect --once exit codes below
+        findings = _doctor_findings_for_snapshots(
+            snapshots, cfg, proc_rows=_doctor_proc_rows()
+        )
+        active, new_state, transitions = _evaluate_all(
+            snapshots, state, cfg.thresholds, doctor_findings=findings
+        )
         return snapshots, active, new_state, transitions
 
     if args.once or args.json or args.list:
@@ -259,7 +460,11 @@ def main(argv: list[str] | None = None) -> int:
             )
         if proc_collector:
             proc_collector.stop()
-        return _exit_code(snapshots, active)
+        # Exit codes remain spill/paging/vram/unreachable only (ignore doctor alarms)
+        resource_active = [
+            a for a in active if a.get("type") not in ("config", "orphan")
+        ]
+        return _exit_code(snapshots, resource_active)
 
     # Live mode
     lock = InstanceLock()
@@ -275,7 +480,12 @@ def main(argv: list[str] | None = None) -> int:
         for snap in snapshots:
             if snap.get("reachable"):
                 last_by_server[snap["server"]] = snap
-        active, new_state, transitions = _evaluate_all(snapshots, state, cfg.thresholds)
+        findings = _doctor_findings_for_snapshots(
+            snapshots, cfg, proc_rows=_doctor_proc_rows()
+        )
+        active, new_state, transitions = _evaluate_all(
+            snapshots, state, cfg.thresholds, doctor_findings=findings
+        )
         if args.toast:
             for t in transitions:
                 notify_transition(t)

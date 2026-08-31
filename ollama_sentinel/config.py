@@ -36,6 +36,13 @@ class AppConfig:
     proc_vram: bool = True
     proc_vram_interval: float = 30.0
     proc_vram_min_mb: int = 64
+    gaming_yield: bool = False
+    gaming_yield_observe: bool = True
+    gaming_yield_interval: float = 12.0
+    gaming_yield_exclude: str = "SolitaireCollection"
+    gaming_yield_min_vram_mb: int = 1536
+    gaming_yield_min_util: float = 50.0
+    gaming_yield_busy_util: float = 20.0
 
 
 def parse_dotenv(path: Path) -> dict[str, str]:
@@ -100,6 +107,8 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         vram_pressure=float(env.get("VRAM_PRESSURE", 0.95)),
     )
     proc_vram_raw = env.get("PROC_VRAM", "1")
+    yield_raw = env.get("GAMING_YIELD", "0")
+    observe_raw = env.get("GAMING_YIELD_OBSERVE", "1")
     return AppConfig(
         ollama_url=env.get("OLLAMA_URL", DEFAULT_URL),
         poll_interval=float(env.get("POLL_INTERVAL", 5)),
@@ -109,6 +118,13 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         proc_vram=proc_vram_raw not in ("0", "false", "False", "no"),
         proc_vram_interval=float(env.get("PROC_VRAM_INTERVAL", 30)),
         proc_vram_min_mb=int(env.get("PROC_VRAM_MIN_MB", 64)),
+        gaming_yield=yield_raw not in ("0", "false", "False", "no"),
+        gaming_yield_observe=observe_raw not in ("0", "false", "False", "no"),
+        gaming_yield_interval=float(env.get("GAMING_YIELD_INTERVAL", 12)),
+        gaming_yield_exclude=env.get("GAMING_YIELD_EXCLUDE", "SolitaireCollection"),
+        gaming_yield_min_vram_mb=int(env.get("GAMING_YIELD_MIN_VRAM_MB", 1536)),
+        gaming_yield_min_util=float(env.get("GAMING_YIELD_MIN_UTIL", 50)),
+        gaming_yield_busy_util=float(env.get("GAMING_YIELD_BUSY_UTIL", 20)),
     )
 
 
@@ -161,6 +177,20 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("model", help="Model name or hf.co/...")
     pp.add_argument("--server", default="local", help="Target server name")
     pp.add_argument("-y", "--yes", action="store_true", help="Skip would-spill confirm")
+    pu = sub.add_parser("unload", help="Unload model(s) from VRAM")
+    pu.add_argument("model", nargs="?", help="Model name (omit with --all)")
+    pu.add_argument("--all", action="store_true", help="Unload every loaded model")
+    pu.add_argument("--server", default="local", help="Target server name")
+    pu.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    doc = sub.add_parser("doctor", help="Diagnose Ollama config drift and orphaned runners")
+    doc.add_argument("--json", action="store_true", help="JSON findings")
+    doc.add_argument(
+        "--fix-orphans",
+        action="store_true",
+        help="Kill orphaned llama-server PIDs after confirmation",
+    )
+    doc.add_argument("--server", default="local", help="Target server name")
+    doc.add_argument("-y", "--yes", action="store_true", help="Skip --fix-orphans confirm")
     return p
 
 

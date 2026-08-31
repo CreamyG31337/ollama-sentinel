@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import flet as ft
 
@@ -196,7 +196,16 @@ def process_vram_table(
     return section_card("Process VRAM", body, subtitle=subtitle or None)
 
 
-def loaded_models_table(models: list[dict[str, Any]]) -> ft.Control | None:
+def _action_cell(control: ft.Control) -> ft.DataCell:
+    return ft.DataCell(control)
+
+
+def loaded_models_table(
+    models: list[dict[str, Any]],
+    *,
+    server_url: str | None = None,
+    on_unload: Callable[[str], None] | None = None,
+) -> ft.Control | None:
     if not models:
         return None
     data_rows: list[ft.DataRow] = []
@@ -206,62 +215,88 @@ def loaded_models_table(models: list[dict[str, Any]]) -> ft.Control | None:
         sv = model.get("size_vram") or 0
         pct = gpu_pct(size, sv)
         spill = sv < size
-        data_rows.append(
-            ft.DataRow(
-                cells=[
-                    _cell(name, weight=ft.FontWeight.W_500),
-                    _cell(f"{sv/1e9:.1f} GB"),
-                    _cell(
-                        f"{100-pct}% CPU / {pct}% GPU",
-                        color=PALETTE["warn"] if spill else PALETTE["ok"],
-                    ),
-                    _cell(format_expires(model.get("expires_at"))),
-                ]
+        cells = [
+            _cell(name, weight=ft.FontWeight.W_500),
+            _cell(f"{sv/1e9:.1f} GB"),
+            _cell(
+                f"{100-pct}% CPU / {pct}% GPU",
+                color=PALETTE["warn"] if spill else PALETTE["ok"],
+            ),
+            _cell(format_expires(model.get("expires_at"), server_url=server_url)),
+        ]
+        if on_unload:
+            cells.append(
+                _action_cell(
+                    ft.OutlinedButton(
+                        "Unload",
+                        on_click=lambda _e, m=name: on_unload(m),
+                        style=ft.ButtonStyle(padding=ft.Padding(left=12, right=12, top=4, bottom=4)),
+                    )
+                )
             )
-        )
+        data_rows.append(ft.DataRow(cells=cells))
+    columns = [
+        ft.DataColumn(ft.Text("Model", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("VRAM", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Split", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Expires", size=12, weight=ft.FontWeight.BOLD)),
+    ]
+    if on_unload:
+        columns.append(ft.DataColumn(ft.Text("", size=12)))
     table = ft.DataTable(
-        columns=[
-            ft.DataColumn(ft.Text("Model", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("VRAM", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Split", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Expires", size=12, weight=ft.FontWeight.BOLD)),
-        ],
+        columns=columns,
         rows=data_rows,
         heading_row_height=32,
-        data_row_min_height=28,
+        data_row_min_height=40,
         column_spacing=12,
         horizontal_margin=8,
     )
     return section_card("Loaded models", table)
 
 
-def library_table(rows: list[dict[str, Any]]) -> ft.Control:
+def library_table(
+    rows: list[dict[str, Any]],
+    *,
+    on_unload: Callable[[str], None] | None = None,
+) -> ft.Control:
     sorted_rows = sorted(rows, key=lambda r: (not r.get("loaded"), r.get("name") or ""))
     data_rows: list[ft.DataRow] = []
     for row in sorted_rows:
         fit_text, fit_color = fit_label(row)
         state = "loaded" if row.get("loaded") else "idle"
         state_color = PALETTE["ok"] if row.get("loaded") else PALETTE["muted"]
-        data_rows.append(
-            ft.DataRow(
-                cells=[
-                    _cell(row["name"]),
-                    _cell(f"{row['size_gb']:.1f} GB"),
-                    _cell(state, color=state_color),
-                    _cell(fit_text, color=fit_color),
-                ]
+        cells = [
+            _cell(row["name"]),
+            _cell(f"{row['size_gb']:.1f} GB"),
+            _cell(state, color=state_color),
+            _cell(fit_text, color=fit_color),
+        ]
+        if on_unload and row.get("loaded"):
+            cells.append(
+                _action_cell(
+                    ft.OutlinedButton(
+                        "Unload",
+                        on_click=lambda _e, m=row["name"]: on_unload(m),
+                        style=ft.ButtonStyle(padding=ft.Padding(left=12, right=12, top=4, bottom=4)),
+                    )
+                )
             )
-        )
+        elif on_unload:
+            cells.append(_cell(""))
+        data_rows.append(ft.DataRow(cells=cells))
+    columns = [
+        ft.DataColumn(ft.Text("Name", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Size", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("State", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Fit", size=12, weight=ft.FontWeight.BOLD)),
+    ]
+    if on_unload:
+        columns.append(ft.DataColumn(ft.Text("", size=12)))
     table = ft.DataTable(
-        columns=[
-            ft.DataColumn(ft.Text("Name", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Size", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("State", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Fit", size=12, weight=ft.FontWeight.BOLD)),
-        ],
+        columns=columns,
         rows=data_rows,
         heading_row_height=32,
-        data_row_min_height=28,
+        data_row_min_height=40,
         column_spacing=12,
         horizontal_margin=8,
     )

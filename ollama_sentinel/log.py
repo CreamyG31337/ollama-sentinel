@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ollama_sentinel.alarms import AlarmTransition
+from ollama_sentinel.telemetry import format_ts_local
 
 DEFAULT_MAX_BYTES = 1_048_576  # 1 MiB
 DEFAULT_BACKUP_COUNT = 3
@@ -55,8 +56,10 @@ def append_alarm_log(
     elif not alarms:
         return False
 
+    ts_val = ts if ts is not None else time.time()
     entry: dict[str, Any] = {
-        "ts": ts if ts is not None else time.time(),
+        "ts": ts_val,
+        "ts_local": format_ts_local(ts_val),
         "alarms": alarms,
     }
     if transitions:
@@ -65,6 +68,31 @@ def append_alarm_log(
             for t in transitions
         ]
 
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _maybe_rotate(path, max_bytes, backup_count)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    return True
+
+
+def append_event_log(
+    path: Path,
+    event: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    ts: float | None = None,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    backup_count: int = DEFAULT_BACKUP_COUNT,
+) -> bool:
+    """Append a generic JSONL event (gaming yield, etc.)."""
+    ts_val = ts if ts is not None else time.time()
+    entry: dict[str, Any] = {
+        "ts": ts_val,
+        "ts_local": format_ts_local(ts_val),
+        "event": event,
+    }
+    if payload:
+        entry.update(payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     _maybe_rotate(path, max_bytes, backup_count)
     with path.open("a", encoding="utf-8") as fh:

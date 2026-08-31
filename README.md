@@ -54,6 +54,15 @@ ollama-sentinel search qwen --sort trendingScore
 # Pull to a server
 ollama-sentinel pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF --server local
 
+# Unload from VRAM (installed files stay on disk)
+ollama-sentinel unload qwen3.8:27b-mtp-q4_K_M --server local
+ollama-sentinel unload --all --server local -y
+
+# Config doctor (Windows + local_gpu): drift, orphans, footguns
+ollama-sentinel doctor
+ollama-sentinel doctor --json
+ollama-sentinel doctor --fix-orphans -y   # opt-in kill of orphaned llama-server PIDs
+
 # GUI (tray on Windows; close hides to tray when tray is enabled)
 ollama-sentinel --gui
 ollama-sentinel --gui --start-minimized    # autostart / logon; window hidden
@@ -61,6 +70,20 @@ ollama-sentinel --gui --no-tray            # window only (Linux default)
 ```
 
 Only one continuous monitor (GUI or live console) may run at a time. A second `--gui` launch focuses the existing window. `--once` and other short commands are always safe alongside the tray app.
+
+### Config doctor (Windows)
+
+`ollama-sentinel doctor` compares User/Machine registry `OLLAMA_*` values to the effective config in `%LOCALAPPDATA%\Ollama\server.log`, looks for orphaned `llama-server.exe` processes, and flags common footguns (connect URL set to `0.0.0.0`, forever keep-alive pinning VRAM, registry changed after last start).
+
+| Exit | Meaning |
+|---|---|
+| 0 | All checks pass |
+| 1 | Any WARN / UNKNOWN |
+| 2 | Any FAIL |
+
+Read-only by default. `--fix-orphans` is the only destructive option and never runs in the tray/`--once` poll path. Restart remedies stop `ollama app`, `ollama`, **and** `llama-server` before relaunching the app.
+
+Passive Check A (config drift) and Check B (orphans) also surface as soft alarms in the GUI/tray poll; Status shows `Doctor: N warnings`. Those alarms do **not** change `--once` exit codes (still spill/paging/vram/unreachable only).
 
 ### Windows Task Scheduler (every 15 min)
 
@@ -93,6 +116,24 @@ Per-process VRAM attribution runs on a **background thread** (default every 30 s
 | `PROC_VRAM_MIN_MB` | `64` | Hide processes below this local VRAM usage |
 
 JSON output (`--once --json`) adds `polled_at` on each snapshot and a top-level `process_vram` block with its own timestamp. Readings older than 3× their interval are marked `STALE`.
+
+## Gaming yield (Windows)
+
+When a real fullscreen game needs the GPU, the tray/GUI process can **detect** that and optionally **unload** Ollama models (`keep_alive: 0`) so VRAM frees for the game. The Ollama server stays up — Open WebUI reconnects with a ~13 s cold reload on the next chat.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GAMING_YIELD_OBSERVE` | `1` | Log `gaming_detected` / `gaming_cleared` to `%LOCALAPPDATA%\ollama-sentinel\gaming.jsonl` |
+| `GAMING_YIELD` | `0` | `1` enables automatic unload (opt-in) |
+| `GAMING_YIELD_INTERVAL` | `12` | Seconds between detection polls |
+| `GAMING_YIELD_EXCLUDE` | `SolitaireCollection` | Comma-separated process names never treated as games |
+| `GAMING_YIELD_MIN_VRAM_MB` | `1536` | Solitaire gate: need this much local VRAM **or** high 3D util |
+| `GAMING_YIELD_MIN_UTIL` | `50` | Solitaire gate / signal D 3D util threshold |
+| `GAMING_YIELD_BUSY_UTIL` | `20` | Do not unload while `llama-server` 3D util is at/above this |
+
+Detection runs only in `--gui` (tray) — not in the 15-minute `--once` task. Status tab shows `Gaming: idle | detected | yielded`.
+
+This is an intentional exception to the original read-only stance; unload stays in `unload.py` + the gaming watcher.
 
 ## License
 

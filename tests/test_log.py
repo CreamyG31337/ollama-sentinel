@@ -27,6 +27,8 @@ class TestLog(unittest.TestCase):
             )
             line = json.loads(path.read_text(encoding="utf-8").strip())
             self.assertEqual(line["alarms"], alarms)
+            self.assertIn("ts_local", line)
+            self.assertRegex(line["ts_local"], r"^\d{2}:\d{2}:\d{2}$")
             self.assertNotIn("inventory", line)
             self.assertNotIn("snapshots", line)
 

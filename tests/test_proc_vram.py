@@ -48,6 +48,23 @@ class TestProcVramWindows(unittest.TestCase):
         self.assertEqual(rows[0]["non_local_bytes"], 100_000_000)
         self.assertEqual(rows[0]["name"], "llama-server")
 
+    @patch("ollama_sentinel.proc_vram._resolve_process_name", return_value="game.exe")
+    @patch("ollama_sentinel.proc_vram.subprocess.run")
+    def test_engine_3d_util(self, mock_run, mock_name):
+        counter_out = json.dumps(
+            [
+                {"Instance": "pid_100_luid_0_phys_0", "Kind": "local", "Value": 2_000_000_000},
+                {
+                    "Instance": "pid_100_luid_0_phys_0_eng_0_engtype_3D",
+                    "Kind": "engine",
+                    "Value": 80.5,
+                },
+            ]
+        )
+        mock_run.return_value = MagicMock(returncode=0, stdout=counter_out, stderr="")
+        rows = _query_windows(min_bytes=64 * 1024 * 1024)
+        self.assertEqual(rows[0]["engine_3d_pct"], 80.5)
+
     @patch("ollama_sentinel.proc_vram._resolve_process_name", return_value="pid 999 (exited)")
     @patch("ollama_sentinel.proc_vram.subprocess.run")
     def test_exited_pid_name(self, mock_run, mock_name):

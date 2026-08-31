@@ -16,15 +16,23 @@ def _make_icon(color: str) -> Image.Image:
     return img
 
 
-def start_tray(*, on_open: Callable[[], None] | None = None, on_quit: Callable[[], None] | None = None) -> pystray.Icon:
+def start_tray(
+    *,
+    on_open: Callable[[], None] | None = None,
+    on_restart: Callable[[], None] | None = None,
+    on_quit: Callable[[], None] | None = None,
+) -> pystray.Icon:
+    items = [
+        pystray.MenuItem("Open", lambda *_: on_open() if on_open else None, default=True),
+    ]
+    if on_restart:
+        items.append(pystray.MenuItem("Restart", lambda *_: on_restart()))
+    items.append(pystray.MenuItem("Quit", lambda *_: on_quit() if on_quit else None))
     icon = pystray.Icon(
         "ollama-sentinel",
         _make_icon("green"),
         "ollama-sentinel",
-        menu=pystray.Menu(
-            pystray.MenuItem("Open", lambda *_: on_open() if on_open else None, default=True),
-            pystray.MenuItem("Quit", lambda *_: on_quit() if on_quit else None),
-        ),
+        menu=pystray.Menu(*items),
     )
 
     def run():

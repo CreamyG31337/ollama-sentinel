@@ -102,7 +102,7 @@ def render_snapshot_plain(
             size = m.get("size") or 0
             sv = m.get("size_vram") or 0
             pct = gpu_pct(size, sv)
-            exp = format_expires(m.get("expires_at"))
+            exp = format_expires(m.get("expires_at"), server_url=snap.get("url"))
             lines.append(
                 f"  {mn}: {size/1e9:.1f} GB total, {sv/1e9:.1f} GB VRAM, "
                 f"{100-pct}% CPU / {pct}% GPU, expires {exp}"
@@ -191,9 +191,10 @@ def build_live_panel(
             size = m.get("size") or 0
             sv = m.get("size_vram") or 0
             pct = gpu_pct(size, sv)
+            exp = format_expires(m.get("expires_at"), server_url=snap.get("url"))
             table.add_row(
                 "  model",
-                f"{mn} · {size/1e9:.1f} GB · {sv/1e9:.1f} GB VRAM · {100-pct}% CPU / {pct}% GPU",
+                f"{mn} · {size/1e9:.1f} GB · {sv/1e9:.1f} GB VRAM · {100-pct}% CPU / {pct}% GPU · expires {exp}",
             )
         for gpu in snap.get("gpus") or []:
             table.add_row("  gpu", format_gpu_line(gpu))

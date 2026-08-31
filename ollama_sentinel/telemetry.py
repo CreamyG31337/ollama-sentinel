@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 MIB = 1024 * 1024
 
 _MISSING = frozenset({"", "[N/A]", "[Not Supported]", "N/A"})
+LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def _parse_numeric(value: str) -> float | None:
@@ -58,6 +60,98 @@ def format_bytes_gb(value: int | None) -> str:
     if value is None:
         return "—"
     return f"{value / 1e9:.1f} GB"
+
+
+def is_local_server_url(url: str | None) -> bool:
+    if not url:
+        return True
+    host = (urlparse(url).hostname or "").lower()
+    return host in LOCAL_HOSTS
+
+
+def parse_rfc3339(value: str) -> datetime | None:
+    if not value:
+        return None
+    s = value.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dot = s.find(".")
+    if dot != -1:
+        plus = s.find("+", dot)
+        minus = s.find("-", dot + 1)
+        tz_at = plus if plus != -1 else minus
+        if tz_at != -1:
+            frac = s[dot + 1 : tz_at]
+            # Windows/Ollama may emit 7+ fractional digits; Python accepts 6 (microseconds).
+            frac = (frac + "000000")[:6]
+            s = s[: dot + 1] + frac + s[tz_at:]
+        else:
+            s = s[:dot] + s[dot : dot + 7]
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _format_duration_seconds(sec: int) -> str:
+    if sec < 60:
+        return f"{sec}s"
+    minutes = sec // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    rem = minutes % 60
+    if rem:
+        return f"{hours}h {rem}m"
+    return f"{hours}h"
+
+
+def format_relative_delta(target: datetime, now: datetime) -> str:
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    delta_sec = int((target - now).total_seconds())
+    if delta_sec >= 0:
+        return f"in {_format_duration_seconds(delta_sec)}"
+    return f"expired {_format_duration_seconds(-delta_sec)} ago"
+
+
+def format_clock_hms(dt: datetime, *, viewer_local: bool = True) -> str:
+    if viewer_local:
+        dt = dt.astimezone()
+    return dt.strftime("%H:%M:%S")
+
+
+def format_expires_display(
+    expires_at: str | None,
+    *,
+    server_url: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    if not expires_at:
+        return "—"
+    if expires_at[:4].isdigit() and int(expires_at[:4]) >= 2100:
+        return "Forever"
+    dt = parse_rfc3339(expires_at)
+    if dt is None:
+        return "—"
+    now_dt = now if now is not None else datetime.now().astimezone()
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    rel = format_relative_delta(dt, now_dt)
+    if is_local_server_url(server_url):
+        clock = format_clock_hms(dt, viewer_local=False)
+    else:
+        clock = format_clock_hms(dt, viewer_local=True)
+    return f"{rel} ({clock})"
+
+
+def format_ts_local(ts: float) -> str:
+    """Viewer-local HH:MM:SS for JSONL human fields."""
+    return datetime.fromtimestamp(ts).astimezone().strftime("%H:%M:%S")
 
 
 def format_poll_age(polled_at: float, now: float) -> str:

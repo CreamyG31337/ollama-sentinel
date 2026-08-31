@@ -71,6 +71,19 @@ class TestAlarms(unittest.TestCase):
     def test_forever_expires(self):
         self.assertEqual(format_expires("2318-01-01T00:00:00Z"), "Forever")
 
+    def test_expires_human_readable(self):
+        from datetime import datetime, timedelta, timezone
+
+        tz = timezone(timedelta(hours=-8))
+        now = datetime(2026, 8, 30, 18, 50, 0, tzinfo=tz)
+        text = format_expires(
+            "2026-08-30T19:17:21-08:00",
+            server_url="http://127.0.0.1:11434",
+            now=now,
+        )
+        self.assertIn("in ", text)
+        self.assertIn("(19:17:21)", text)
+
     def test_gpu_pct(self):
         self.assertEqual(gpu_pct(100, 60), 60)
 
