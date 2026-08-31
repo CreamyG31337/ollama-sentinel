@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ollama_sentinel.metrics import make_metrics_store
+from ollama_sentinel.activity import build_server_activity
 from ollama_sentinel.alarms import AlarmState, evaluate_alarms
 from ollama_sentinel.catalog import search_models, typeahead
 from ollama_sentinel.config import build_parser, resolve_config, resolve_gui_options, selected_servers
@@ -30,6 +32,29 @@ from ollama_sentinel.doctor import (
 )
 from ollama_sentinel.doctor_win import kill_orphan_pids
 from ollama_sentinel.unload import unload_model, unload_models
+
+
+def _attach_activity(
+    snapshots: list[dict[str, Any]],
+    proc_rows: list[dict[str, Any]] | None,
+    cfg,
+) -> list[dict[str, Any]]:
+    if sys.platform != "win32":
+        return snapshots
+    servers = {s.name: s for s in selected_servers(cfg)}
+    out: list[dict[str, Any]] = []
+    for snap in snapshots:
+        if not snap.get("reachable"):
+            out.append(snap)
+            continue
+        srv = servers.get(snap.get("server"))
+        if srv is not None and not srv.local_gpu:
+            out.append(snap)
+            continue
+        enriched = dict(snap)
+        enriched["activity"] = build_server_activity(proc_rows=proc_rows).to_dict()
+        out.append(enriched)
+    return out
 
 
 def _evaluate_all(
@@ -430,8 +455,10 @@ def main(argv: list[str] | None = None) -> int:
                 proc_collector.stop()
             return _exit_code(snapshots, active)
         proc_block = _process_vram_payload(proc_collector, cfg, sync=once_mode)
+        proc_rows = (proc_block or {}).get("rows") if proc_block else None
+        snapshots_out = _attach_activity(snapshots, proc_rows, cfg)
         payload = {
-            "snapshots": snapshots,
+            "snapshots": snapshots_out,
             "alarms": active,
             "inventory": {
                 s.get("server"): build_inventory(s) for s in snapshots if s.get("reachable")
@@ -444,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(
                 render_snapshot_plain(
-                    snapshots,
+                    snapshots_out,
                     active,
                     poll_interval=cfg.poll_interval,
                     process_vram=proc_block,
@@ -473,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     renderer = LiveRenderer()
     last_by_server: dict[str, dict[str, Any]] = {}
+    metrics_store = make_metrics_store(cfg)
 
     def poll_fn():
         nonlocal state, last_by_server
@@ -480,6 +508,15 @@ def main(argv: list[str] | None = None) -> int:
         for snap in snapshots:
             if snap.get("reachable"):
                 last_by_server[snap["server"]] = snap
+            if metrics_store is not None:
+                metrics_store.ingest_snapshot(snap)
+        if metrics_store is not None:
+            proc_block = _process_vram_payload(proc_collector, cfg)
+            if proc_block and proc_block.get("rows"):
+                metrics_store.ingest_proc_vram(
+                    proc_block["rows"],
+                    ts=proc_block.get("polled_at_ts"),
+                )
         findings = _doctor_findings_for_snapshots(
             snapshots, cfg, proc_rows=_doctor_proc_rows()
         )

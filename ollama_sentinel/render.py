@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from ollama_sentinel.alarms import format_expires, gpu_pct
+from ollama_sentinel.activity import build_server_activity, model_detail_line
 from ollama_sentinel.inventory import build_inventory, inventory_summary
 from ollama_sentinel.telemetry import format_gpu_line, format_poll_age, is_stale
 
@@ -59,14 +60,41 @@ def _format_process_vram(process_vram: dict[str, Any] | None, *, interval: float
         lines.append("  (no processes above threshold)")
     for row in rows:
         local_gb = row.get("bytes", 0) / 1e9
+        util = row.get("engine_3d_pct")
+        util_s = f", {util:.0f}% util" if util is not None else ""
         non_local = row.get("non_local_bytes")
         if non_local is not None:
             lines.append(
                 f"  {row.get('pid')} {row.get('name')}: "
-                f"{local_gb:.2f} GB local, {non_local / 1e9:.2f} GB non-local"
+                f"{local_gb:.2f} GB local, {non_local / 1e9:.2f} GB non-local{util_s}"
             )
         else:
-            lines.append(f"  {row.get('pid')} {row.get('name')}: {local_gb:.2f} GB")
+            lines.append(f"  {row.get('pid')} {row.get('name')}: {local_gb:.2f} GB{util_s}")
+    return lines
+
+
+def _format_activity(snap: dict[str, Any], proc_rows: list[dict[str, Any]] | None) -> list[str]:
+    activity = snap.get("activity")
+    if activity is None:
+        import sys
+
+        if sys.platform == "win32":
+            activity = build_server_activity(proc_rows=proc_rows).to_dict()
+        else:
+            return []
+    lines = [f"  Activity: {activity.get('summary', '—')}"]
+    for r in activity.get("runners") or []:
+        util = r.get("engine_3d_pct") or 0
+        tag = "busy" if r.get("busy") else "idle"
+        lines.append(
+            f"    runner pid {r.get('pid')} {r.get('vram_bytes', 0) / 1e9:.1f} GB "
+            f"· {util:.0f}% util · {tag}"
+        )
+    last = activity.get("last_request")
+    if last:
+        lines.append(
+            f"    last {last.get('method')} {last.get('path')} from {last.get('client')}"
+        )
     return lines
 
 
@@ -97,14 +125,17 @@ def render_snapshot_plain(
         inv = build_inventory(snap)
         free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
         lines.append(f"  Library: {inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)}")
+        proc_rows = (process_vram or {}).get("rows") if process_vram else None
+        lines.extend(_format_activity(snap, proc_rows))
         for m in snap.get("models") or []:
             mn = m.get("name") or "?"
             size = m.get("size") or 0
             sv = m.get("size_vram") or 0
             pct = gpu_pct(size, sv)
             exp = format_expires(m.get("expires_at"), server_url=snap.get("url"))
+            detail = model_detail_line(m)
             lines.append(
-                f"  {mn}: {size/1e9:.1f} GB total, {sv/1e9:.1f} GB VRAM, "
+                f"  {mn}: {detail} · {size/1e9:.1f} GB total, {sv/1e9:.1f} GB VRAM, "
                 f"{100-pct}% CPU / {pct}% GPU, expires {exp}"
             )
         for gpu in snap.get("gpus") or []:
@@ -186,15 +217,20 @@ def build_live_panel(
             srv,
             f"v{snap.get('version')} · {inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)}{age_suffix}",
         )
+        proc_rows = (process_vram or {}).get("rows") if process_vram else None
+        for act_line in _format_activity(snap, proc_rows):
+            table.add_row("  activity", act_line.strip())
         for m in snap.get("models") or []:
             mn = m.get("name") or "?"
             size = m.get("size") or 0
             sv = m.get("size_vram") or 0
             pct = gpu_pct(size, sv)
             exp = format_expires(m.get("expires_at"), server_url=snap.get("url"))
+            detail = model_detail_line(m)
             table.add_row(
                 "  model",
-                f"{mn} · {size/1e9:.1f} GB · {sv/1e9:.1f} GB VRAM · {100-pct}% CPU / {pct}% GPU · expires {exp}",
+                f"{mn} · {detail} · {size/1e9:.1f} GB · {sv/1e9:.1f} GB VRAM · "
+                f"{100-pct}% CPU / {pct}% GPU · expires {exp}",
             )
         for gpu in snap.get("gpus") or []:
             table.add_row("  gpu", format_gpu_line(gpu))

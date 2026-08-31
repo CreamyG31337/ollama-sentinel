@@ -43,6 +43,10 @@ class AppConfig:
     gaming_yield_min_vram_mb: int = 1536
     gaming_yield_min_util: float = 50.0
     gaming_yield_busy_util: float = 20.0
+    metrics: bool = True
+    metrics_history_sec: float = 3600.0
+    metrics_max_samples: int = 720
+    metrics_log: Path | None = None
 
 
 def parse_dotenv(path: Path) -> dict[str, str]:
@@ -109,6 +113,8 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
     proc_vram_raw = env.get("PROC_VRAM", "1")
     yield_raw = env.get("GAMING_YIELD", "0")
     observe_raw = env.get("GAMING_YIELD_OBSERVE", "1")
+    metrics_raw = env.get("METRICS", "1")
+    metrics_log_raw = env.get("METRICS_LOG", "").strip()
     return AppConfig(
         ollama_url=env.get("OLLAMA_URL", DEFAULT_URL),
         poll_interval=float(env.get("POLL_INTERVAL", 5)),
@@ -125,6 +131,10 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         gaming_yield_min_vram_mb=int(env.get("GAMING_YIELD_MIN_VRAM_MB", 1536)),
         gaming_yield_min_util=float(env.get("GAMING_YIELD_MIN_UTIL", 50)),
         gaming_yield_busy_util=float(env.get("GAMING_YIELD_BUSY_UTIL", 20)),
+        metrics=metrics_raw not in ("0", "false", "False", "no"),
+        metrics_history_sec=float(env.get("METRICS_HISTORY_SEC", 3600)),
+        metrics_max_samples=int(env.get("METRICS_MAX_SAMPLES", 720)),
+        metrics_log=Path(metrics_log_raw) if metrics_log_raw else None,
     )
 
 

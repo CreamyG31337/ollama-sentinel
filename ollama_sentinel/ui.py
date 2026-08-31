@@ -10,6 +10,8 @@ from typing import Any
 
 import flet as ft
 
+from ollama_sentinel.metrics import make_metrics_store
+from ollama_sentinel.activity import build_server_activity
 from ollama_sentinel.alarms import evaluate_alarms
 from ollama_sentinel.catalog import search_models
 from ollama_sentinel.config import AppConfig, selected_servers
@@ -29,8 +31,10 @@ from ollama_sentinel.state import load_state, save_state
 from ollama_sentinel.telemetry import format_poll_age, is_stale
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
+from ollama_sentinel.ui_charts import metrics_charts_panel
 from ollama_sentinel.ui_widgets import (
     PALETTE,
+    activity_card,
     alarm_banner,
     gpu_table,
     library_table,
@@ -170,6 +174,7 @@ def run_gui(
         servers = selected_servers(cfg)
         proc_collector: ProcessVramCollector | None = None
         gaming_watcher: GamingYieldWatcher | None = None
+        metrics_store = make_metrics_store(cfg)
         last_good: dict[str, dict[str, Any]] = {}
         last_snap: dict[str, Any] = {}
         if cfg.proc_vram and any(s.local_gpu for s in servers):
@@ -228,11 +233,15 @@ def run_gui(
         alarm_host = ft.Container()
         gpu_host = ft.Column(spacing=8)
         models_host = ft.Column(spacing=8)
+        activity_host = ft.Container()
         proc_vram_host = ft.Column(spacing=8)
         gaming_status = ft.Text("", size=12, color=PALETTE["muted"])
         doctor_status = ft.Text("", size=12, color=PALETTE["muted"])
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
+        poll_state: dict[str, Any] = {"polled_ts": None, "stale": False}
         library_host = ft.Column(spacing=8, expand=True)
+        charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
+        chart_window_s = {"value": 300.0}
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
         search_field = ft.TextField(label="Search Hugging Face", expand=True)
         pull_status = ft.Text("")
@@ -244,6 +253,55 @@ def run_gui(
                 if s.name == name:
                     return s
             return servers[0]
+
+        def update_charts() -> None:
+            if metrics_store is None:
+                charts_host.controls = [
+                    ft.Text("Metrics disabled (METRICS=0)", size=12, color=PALETTE["muted"]),
+                ]
+                return
+            srv = get_server_cfg()
+            charts_host.controls = [
+                metrics_charts_panel(
+                    metrics_store,
+                    window_s=chart_window_s["value"],
+                    server=srv.name,
+                ),
+            ]
+
+        def on_chart_window(e) -> None:
+            sel = e.control.selected
+            if sel:
+                chart_window_s["value"] = float(sel[0])
+            update_charts()
+            page.update()
+
+        chart_window_pick = ft.SegmentedButton(
+            selected=["300"],
+            segments=[
+                ft.Segment(value="300", label="5m"),
+                ft.Segment(value="900", label="15m"),
+                ft.Segment(value="3600", label="1h"),
+            ],
+            on_change=on_chart_window,
+        )
+
+        def update_poll_footer(now: float | None = None) -> None:
+            polled_ts = poll_state.get("polled_ts")
+            if polled_ts is None:
+                return
+            tick = now if now is not None else time.time()
+            stale_poll = bool(
+                poll_state.get("stale")
+                or is_stale(polled_ts, cfg.poll_interval, tick)
+            )
+            footer = format_poll_age(polled_ts, tick)
+            if stale_poll:
+                poll_footer.value = f"STALE · {footer}"
+                poll_footer.color = PALETTE["stale"]
+            else:
+                poll_footer.value = f"Updated {footer}"
+                poll_footer.color = PALETTE["muted"]
 
         def _close_dialog(dlg: ft.AlertDialog) -> None:
             dlg.open = False
@@ -331,6 +389,9 @@ def run_gui(
             if snap.get("reachable"):
                 last_good[srv.name] = snap
 
+            if metrics_store is not None:
+                metrics_store.ingest_snapshot(snap)
+
             state = load_state(cfg.state_file)
             active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
 
@@ -381,18 +442,9 @@ def run_gui(
 
             now = time.time()
             polled_ts = snap.get("polled_at_ts")
-            stale_poll = bool(
-                snap.get("stale")
-                or (polled_ts is not None and is_stale(polled_ts, cfg.poll_interval, now))
-            )
-            if polled_ts is not None:
-                footer = format_poll_age(polled_ts, now)
-                if stale_poll:
-                    poll_footer.value = f"STALE · {footer}"
-                    poll_footer.color = PALETTE["stale"]
-                else:
-                    poll_footer.value = f"Updated {footer}"
-                    poll_footer.color = PALETTE["muted"]
+            poll_state["polled_ts"] = polled_ts
+            poll_state["stale"] = bool(snap.get("stale"))
+            update_poll_footer(now)
 
             alarm_host.content = alarm_banner(
                 snap.get("reachable", False),
@@ -413,9 +465,24 @@ def run_gui(
             if models_card is not None:
                 models_host.controls.append(models_card)
 
+            activity_host.content = None
+            if srv.local_gpu and sys.platform == "win32":
+                proc_rows = None
+                if proc_collector:
+                    proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
+                act = build_server_activity(proc_rows=proc_rows)
+                card = activity_card(act)
+                if card is not None:
+                    activity_host.content = card
+
             proc_vram_host.controls.clear()
             if proc_collector:
                 pv = proc_collector.get_snapshot()
+                if metrics_store is not None and pv.get("rows"):
+                    metrics_store.ingest_proc_vram(
+                        pv.get("rows") or [],
+                        ts=pv.get("polled_at_ts"),
+                    )
                 pv_ts = pv.get("polled_at_ts")
                 pv_age = format_poll_age(pv_ts, now) if pv_ts is not None else None
                 pv_stale = bool(
@@ -458,6 +525,7 @@ def run_gui(
             else:
                 gaming_status.value = ""
 
+            update_charts()
             page.update()
 
         def do_search(_=None) -> None:
@@ -526,10 +594,10 @@ def run_gui(
 
         status_page = ft.Column(
             [
-                current_server,
                 alarm_host,
                 gpu_host,
                 models_host,
+                activity_host,
                 proc_vram_host,
                 gaming_status,
                 doctor_status,
@@ -541,26 +609,56 @@ def run_gui(
             scroll=ft.ScrollMode.AUTO,
             spacing=10,
         )
+        charts_page = ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text("Window", size=12, color=PALETTE["muted"]),
+                        chart_window_pick,
+                    ],
+                    spacing=8,
+                ),
+                charts_host,
+                action_row,
+            ],
+            expand=True,
+            spacing=10,
+        )
         library_page = ft.Column([library_host, action_row], expand=True, spacing=10)
         discover_page = ft.Column(
             [search_field, ft.ElevatedButton("Search", on_click=do_search), pull_status, discover_col],
             expand=True,
             spacing=10,
         )
-        pages = [status_page, library_page, discover_page]
+        pages = [status_page, charts_page, library_page, discover_page]
 
         nav = ft.NavigationRail(
             selected_index=0,
             destinations=[
                 ft.NavigationRailDestination(icon=ft.Icons.MONITOR_HEART, label="Status"),
+                ft.NavigationRailDestination(icon=ft.Icons.SHOW_CHART, label="Charts"),
                 ft.NavigationRailDestination(icon=ft.Icons.LIBRARY_BOOKS, label="Library"),
                 ft.NavigationRailDestination(icon=ft.Icons.SEARCH, label="Discover"),
             ],
         )
-        content_area = ft.Container(content=status_page, expand=True, padding=ft.Padding(left=8))
+        content_area = ft.Container(
+            content=ft.Column(
+                [current_server, status_page],
+                expand=True,
+                spacing=10,
+            ),
+            expand=True,
+            padding=ft.Padding(left=8),
+        )
 
         def on_nav(e):
-            content_area.content = pages[int(e.control.selected_index)]
+            idx = int(e.control.selected_index)
+            page_body = pages[idx]
+            content_area.content = ft.Column(
+                [current_server, page_body],
+                expand=True,
+                spacing=10,
+            )
             page.update()
 
         nav.on_change = on_nav
@@ -576,6 +674,17 @@ def run_gui(
                 except Exception:
                     pass
 
+        def footer_tick_loop():
+            while True:
+                time.sleep(1)
+                try:
+                    if poll_state.get("polled_ts") is None:
+                        continue
+                    update_poll_footer()
+                    poll_footer.update()
+                except Exception:
+                    pass
+
         def show_request_loop():
             while True:
                 time.sleep(1)
@@ -586,6 +695,7 @@ def run_gui(
                     pass
 
         threading.Thread(target=poll_loop, daemon=True).start()
+        threading.Thread(target=footer_tick_loop, daemon=True).start()
         if instance_lock is not None:
             threading.Thread(target=show_request_loop, daemon=True).start()
 

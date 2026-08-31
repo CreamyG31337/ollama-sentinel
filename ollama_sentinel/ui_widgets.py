@@ -7,6 +7,7 @@ from typing import Any, Callable
 import flet as ft
 
 from ollama_sentinel.alarms import format_expires, gpu_pct
+from ollama_sentinel.activity import ServerActivity, model_detail_line
 from ollama_sentinel.telemetry import format_bytes_gb, format_field, format_throttle
 
 PALETTE = {
@@ -145,6 +146,68 @@ def gpu_table(gpu: dict[str, Any]) -> ft.Control:
     return section_card(name, _metric_table(metrics, footer=throttle))
 
 
+def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Control | None:
+    if activity is None:
+        return None
+    if isinstance(activity, dict):
+        phase = activity.get("phase", "idle")
+        summary = activity.get("summary", "—")
+        stale = bool(activity.get("stale"))
+        runners = activity.get("runners") or []
+        recent = activity.get("recent_requests") or []
+        last_req = activity.get("last_request")
+    else:
+        phase = activity.phase
+        summary = activity.summary
+        stale = activity.stale
+        runners = [r.to_dict() for r in activity.runners]
+        recent = [r.to_dict() for r in activity.recent_requests]
+        last_req = activity.last_request.to_dict() if activity.last_request else None
+
+    color = PALETTE["ok"] if phase == "idle" else PALETTE["warn"]
+    if phase in ("prompt", "generating", "embed"):
+        color = PALETTE["ok"] if phase == "embed" else ft.Colors.CYAN_300
+
+    lines: list[ft.Control] = [
+        ft.Text(summary, size=13, weight=ft.FontWeight.W_500, color=color),
+    ]
+    if stale:
+        lines.append(ft.Text("Log signal stale; using GPU util", size=11, color=PALETTE["stale"]))
+
+    if runners:
+        runner_bits = []
+        for r in runners[:4]:
+            util = r.get("engine_3d_pct") or 0
+            tag = "busy" if r.get("busy") else "idle"
+            runner_bits.append(
+                f"pid {r.get('pid')} {r.get('vram_bytes', 0) / 1e9:.1f} GB · {util:.0f}% util · {tag}"
+            )
+        lines.append(ft.Text(" · ".join(runner_bits), size=11, color=PALETTE["muted"]))
+
+    if last_req:
+        dur = last_req.get("duration_s")
+        dur_s = f" {dur * 1000:.0f}ms" if dur is not None and dur < 1 else (f" {dur:.2f}s" if dur else "")
+        lines.append(
+            ft.Text(
+                f"Last {last_req.get('method')} {last_req.get('path')} "
+                f"({last_req.get('client')}{dur_s})",
+                size=11,
+                color=PALETTE["muted"],
+            )
+        )
+    elif recent:
+        req = recent[-1]
+        lines.append(
+            ft.Text(
+                f"Recent {req.get('method')} {req.get('path')} ({req.get('client')})",
+                size=11,
+                color=PALETTE["muted"],
+            )
+        )
+
+    return section_card("Activity", ft.Column(lines, spacing=4))
+
+
 def process_vram_table(
     rows: list[dict[str, Any]],
     *,
@@ -166,6 +229,7 @@ def process_vram_table(
             ft.DataColumn(ft.Text("PID", size=12, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Process", size=12, weight=ft.FontWeight.BOLD)),
             ft.DataColumn(ft.Text("Local", size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("GPU util", size=12, weight=ft.FontWeight.BOLD)),
         ]
         if has_non_local:
             columns.append(ft.DataColumn(ft.Text("Non-local", size=12, weight=ft.FontWeight.BOLD)))
@@ -173,10 +237,14 @@ def process_vram_table(
         data_rows: list[ft.DataRow] = []
         for row in rows:
             local_gb = row.get("bytes", 0) / 1e9
+            util = row.get("engine_3d_pct")
+            util_text = f"{util:.0f}%" if util is not None else "—"
+            util_color = PALETTE["ok"] if (util or 0) >= 5 else PALETTE["muted"]
             cells = [
                 _cell(str(row.get("pid", "?"))),
                 _cell(str(row.get("name", "?"))),
                 _cell(f"{local_gb:.2f} GB"),
+                _cell(util_text, color=util_color),
             ]
             if has_non_local:
                 non_local = row.get("non_local_bytes") or 0
@@ -217,6 +285,7 @@ def loaded_models_table(
         spill = sv < size
         cells = [
             _cell(name, weight=ft.FontWeight.W_500),
+            _cell(model_detail_line(model)),
             _cell(f"{sv/1e9:.1f} GB"),
             _cell(
                 f"{100-pct}% CPU / {pct}% GPU",
@@ -237,6 +306,7 @@ def loaded_models_table(
         data_rows.append(ft.DataRow(cells=cells))
     columns = [
         ft.DataColumn(ft.Text("Model", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Details", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("VRAM", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("Split", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("Expires", size=12, weight=ft.FontWeight.BOLD)),
