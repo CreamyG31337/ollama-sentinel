@@ -187,13 +187,12 @@ def _process_vram_payload(
     }
 
 
-def _poll(cfg, last_snapshots: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def _poll(cfg) -> list[dict[str, Any]]:
     servers = selected_servers(cfg)
     return poll_all(
         [{"name": s.name, "url": s.url, "local_gpu": s.local_gpu} for s in servers],
         gpu_filter=cfg.gpu_filter,
         query_gpus_fn=query_gpus,
-        last_snapshots=last_snapshots,
     )
 
 
@@ -430,8 +429,8 @@ def main(argv: list[str] | None = None) -> int:
             return None
         return block.get("rows") or []
 
-    def cycle(last_snapshots=None):
-        snapshots = _poll(cfg, last_snapshots=last_snapshots)
+    def cycle():
+        snapshots = _poll(cfg)
         # Passive doctor (A+B mapped to alarms) — do not affect --once exit codes below
         findings = _doctor_findings_for_snapshots(
             snapshots, cfg, proc_rows=_doctor_proc_rows()
@@ -499,15 +498,12 @@ def main(argv: list[str] | None = None) -> int:
         print("Another ollama-sentinel monitor is already running.", file=sys.stderr)
         return 1
     renderer = LiveRenderer()
-    last_by_server: dict[str, dict[str, Any]] = {}
     metrics_store = make_metrics_store(cfg)
 
     def poll_fn():
-        nonlocal state, last_by_server
-        snapshots = _poll(cfg, last_snapshots=last_by_server or None)
+        nonlocal state
+        snapshots = _poll(cfg)
         for snap in snapshots:
-            if snap.get("reachable"):
-                last_by_server[snap["server"]] = snap
             if metrics_store is not None:
                 metrics_store.ingest_snapshot(snap)
         if metrics_store is not None:

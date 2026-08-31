@@ -175,7 +175,6 @@ def run_gui(
         proc_collector: ProcessVramCollector | None = None
         gaming_watcher: GamingYieldWatcher | None = None
         metrics_store = make_metrics_store(cfg)
-        last_good: dict[str, dict[str, Any]] = {}
         last_snap: dict[str, Any] = {}
         if cfg.proc_vram and any(s.local_gpu for s in servers):
             proc_collector = ProcessVramCollector(
@@ -238,7 +237,7 @@ def run_gui(
         gaming_status = ft.Text("", size=12, color=PALETTE["muted"])
         doctor_status = ft.Text("", size=12, color=PALETTE["muted"])
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
-        poll_state: dict[str, Any] = {"polled_ts": None, "stale": False}
+        poll_state: dict[str, Any] = {"polled_ts": None, "stale": False, "reachable": True}
         library_host = ft.Column(spacing=8, expand=True)
         charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
         chart_window_s = {"value": 300.0}
@@ -382,12 +381,10 @@ def run_gui(
                 target,
                 gpu_filter=cfg.gpu_filter,
                 query_gpus_fn=query_gpus,
-                last_snapshots=last_good or None,
             )[0]
             last_snap.clear()
             last_snap.update(snap)
-            if snap.get("reachable"):
-                last_good[srv.name] = snap
+            reachable = bool(snap.get("reachable"))
 
             if metrics_store is not None:
                 metrics_store.ingest_snapshot(snap)
@@ -396,7 +393,7 @@ def run_gui(
             active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
 
             doctor_alarms: list[dict[str, Any]] = []
-            if srv.local_gpu and sys.platform == "win32":
+            if reachable and srv.local_gpu and sys.platform == "win32":
                 try:
                     inputs = collect_doctor_inputs()
                     proc_rows = None
@@ -444,10 +441,19 @@ def run_gui(
             polled_ts = snap.get("polled_at_ts")
             poll_state["polled_ts"] = polled_ts
             poll_state["stale"] = bool(snap.get("stale"))
-            update_poll_footer(now)
+            poll_state["reachable"] = reachable
+            if not reachable:
+                poll_footer.value = (
+                    f"Unreachable · {format_poll_age(polled_ts, now)}"
+                    if polled_ts is not None
+                    else "Unreachable"
+                )
+                poll_footer.color = PALETTE["alarm"]
+            else:
+                update_poll_footer(now)
 
             alarm_host.content = alarm_banner(
-                snap.get("reachable", False),
+                reachable,
                 active,
                 error=snap.get("error"),
             )
@@ -457,16 +463,17 @@ def run_gui(
                 gpu_host.controls.append(gpu_table(gpu))
 
             models_host.controls.clear()
-            models_card = loaded_models_table(
-                snap.get("models") or [],
-                server_url=srv.url,
-                on_unload=request_unload,
-            )
-            if models_card is not None:
-                models_host.controls.append(models_card)
+            if reachable:
+                models_card = loaded_models_table(
+                    snap.get("models") or [],
+                    server_url=srv.url,
+                    on_unload=request_unload,
+                )
+                if models_card is not None:
+                    models_host.controls.append(models_card)
 
             activity_host.content = None
-            if srv.local_gpu and sys.platform == "win32":
+            if reachable and srv.local_gpu and sys.platform == "win32":
                 proc_rows = None
                 if proc_collector:
                     proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
@@ -499,18 +506,26 @@ def run_gui(
                 )
 
             library_host.controls.clear()
-            inv = build_inventory(snap)
-            free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
-            summary = inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)
-            library_host.controls.append(
-                section_card(
-                    "Library",
-                    library_table(inv, on_unload=request_unload),
-                    subtitle=summary,
+            if reachable:
+                inv = build_inventory(snap)
+                free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
+                summary = inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)
+                library_host.controls.append(
+                    section_card(
+                        "Library",
+                        library_table(inv, on_unload=request_unload),
+                        subtitle=summary,
+                    )
                 )
-            )
+            else:
+                library_host.controls.append(
+                    section_card(
+                        "Library",
+                        ft.Text("Ollama is not running.", size=12, color=PALETTE["muted"]),
+                    )
+                )
 
-            unload_all_btn.disabled = not bool(snap.get("models"))
+            unload_all_btn.disabled = not reachable or not bool(snap.get("models"))
 
             if gaming_watcher:
                 gst = gaming_watcher.get_status()
@@ -680,7 +695,12 @@ def run_gui(
                 try:
                     if poll_state.get("polled_ts") is None:
                         continue
-                    update_poll_footer()
+                    if not poll_state.get("reachable", True):
+                        polled_ts = poll_state["polled_ts"]
+                        poll_footer.value = f"Unreachable · {format_poll_age(polled_ts, time.time())}"
+                        poll_footer.color = PALETTE["alarm"]
+                    else:
+                        update_poll_footer()
                     poll_footer.update()
                 except Exception:
                     pass

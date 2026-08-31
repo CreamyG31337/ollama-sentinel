@@ -54,14 +54,17 @@ def poll_server(
     ps, perr = _get_json(url, "/api/ps")
     tags, terr = _get_json(url, "/api/tags")
 
-    if ps is None and tags is None and version is None:
-        snapshot["error"] = verr or perr or terr or "unreachable"
-        return snapshot
-
     ts = polled_at if polled_at is not None else time.time()
     snapshot["polled_at"] = polled_at_iso(ts)
     snapshot["polled_at_ts"] = ts
-    snapshot["reachable"] = ps is not None or tags is not None or version is not None
+
+    if ps is None and tags is None and version is None:
+        snapshot["error"] = verr or perr or terr or "unreachable"
+        if attach_gpus and query_gpus_fn:
+            snapshot["gpus"] = query_gpus_fn(gpu_filter)
+        return snapshot
+
+    snapshot["reachable"] = True
     if version:
         snapshot["version"] = version.get("version")
     if ps:
@@ -80,7 +83,6 @@ def poll_all(
     *,
     gpu_filter: int | None = None,
     query_gpus_fn=None,
-    last_snapshots: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Poll every configured server."""
     local_gpu_data = query_gpus_fn(gpu_filter) if query_gpus_fn else None
@@ -97,13 +99,5 @@ def poll_all(
             query_gpus_fn=lambda gf: local_gpu_data,
             polled_at=polled_at,
         )
-        if not snap.get("reachable") and last_snapshots:
-            prev = last_snapshots.get(srv["name"])
-            if prev and prev.get("reachable"):
-                stale = dict(prev)
-                stale["stale"] = True
-                stale["error"] = snap.get("error")
-                results.append(stale)
-                continue
         results.append(snap)
     return results
