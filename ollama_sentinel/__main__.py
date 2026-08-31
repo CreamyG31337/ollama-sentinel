@@ -9,11 +9,14 @@ from typing import Any
 
 from ollama_sentinel.alarms import AlarmState, evaluate_alarms
 from ollama_sentinel.catalog import search_models, typeahead
-from ollama_sentinel.config import build_parser, resolve_config, selected_servers
+from ollama_sentinel.config import build_parser, resolve_config, resolve_gui_options, selected_servers
+from ollama_sentinel.instance import InstanceLock
 from ollama_sentinel.inventory import build_inventory
 from ollama_sentinel.log import append_alarm_log
 from ollama_sentinel.notify import notify_transition
 from ollama_sentinel.poll import poll_all
+from ollama_sentinel.proc_vram import ProcessVramCollector, query_process_vram
+from ollama_sentinel.telemetry import polled_at_iso
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.render import LiveRenderer, render_list_table, render_snapshot_plain
 from ollama_sentinel.smi import query_gpus
@@ -47,12 +50,71 @@ def _evaluate_all(
     return all_active, new_state, transitions
 
 
-def _poll(cfg) -> list[dict[str, Any]]:
+def _proc_vram_enabled(cfg) -> bool:
+    return cfg.proc_vram and any(s.local_gpu for s in selected_servers(cfg))
+
+
+def _make_proc_collector(cfg) -> ProcessVramCollector | None:
+    if not _proc_vram_enabled(cfg):
+        return None
+    collector = ProcessVramCollector(
+        interval=cfg.proc_vram_interval,
+        enabled=True,
+        min_bytes=cfg.proc_vram_min_mb * 1024 * 1024,
+    )
+    collector.start()
+    return collector
+
+
+def _process_vram_payload(
+    collector: ProcessVramCollector | None,
+    cfg,
+    *,
+    sync: bool = False,
+) -> dict[str, Any] | None:
+    if not _proc_vram_enabled(cfg) or (collector is None and not sync):
+        return None
+    if sync:
+        import time as time_mod
+
+        try:
+            rows = query_process_vram(cfg.proc_vram_min_mb * 1024 * 1024)
+            now = time_mod.time()
+            return {
+                "enabled": True,
+                "polled_at": polled_at_iso(now),
+                "polled_at_ts": now,
+                "stale": False,
+                "error": None,
+                "rows": rows,
+            }
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "polled_at": None,
+                "polled_at_ts": None,
+                "stale": True,
+                "error": str(exc),
+                "rows": [],
+            }
+    snap = collector.get_snapshot()
+    return {
+        "enabled": True,
+        "polled_at": snap.get("polled_at"),
+        "polled_at_ts": snap.get("polled_at_ts"),
+        "stale": snap.get("stale", False),
+        "error": snap.get("error"),
+        "rows": snap.get("rows") or [],
+    }
+
+
+def _poll(cfg, last_snapshots: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     servers = selected_servers(cfg)
     return poll_all(
         [{"name": s.name, "url": s.url, "local_gpu": s.local_gpu} for s in servers],
         gpu_filter=cfg.gpu_filter,
         query_gpus_fn=query_gpus,
+        last_snapshots=last_snapshots,
     )
 
 
@@ -99,7 +161,6 @@ def cmd_pull(args, cfg) -> int:
             query_gpus_fn=query_gpus,
         )
         inv = build_inventory(snaps[0]) if snaps else []
-        # rough check: any unloaded model that would spill for this pull size unknown — skip if no free vram info
         from ollama_sentinel.inventory import free_vram_bytes
 
         free = free_vram_bytes(snaps[0].get("gpus") if snaps else None)
@@ -124,11 +185,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = resolve_config(args)
 
-    if args.gui or args.tray or args.tray_only:
+    if args.gui:
+        lock = InstanceLock()
+        if not lock.try_acquire(InstanceLock.CONTINUOUS):
+            lock.request_show()
+            return 0
+        tray, start_hidden = resolve_gui_options(args)
         from ollama_sentinel.ui import run_gui
 
-        run_gui(cfg, tray=args.tray or args.tray_only,
-                start_hidden=args.tray_only)
+        try:
+            run_gui(cfg, tray=tray, start_hidden=start_hidden, instance_lock=lock)
+        finally:
+            lock.release()
         return 0
 
     if args.command == "search":
@@ -139,9 +207,11 @@ def main(argv: list[str] | None = None) -> int:
 
     state_path = cfg.state_file or Path("state.json")
     state = load_state(state_path)
+    once_mode = args.once or args.json or args.list
+    proc_collector = _make_proc_collector(cfg) if not once_mode else None
 
-    def cycle() -> tuple[list[dict[str, Any]], list[dict[str, Any]], AlarmState, list]:
-        snapshots = _poll(cfg)
+    def cycle(last_snapshots=None):
+        snapshots = _poll(cfg, last_snapshots=last_snapshots)
         active, new_state, transitions = _evaluate_all(snapshots, state, cfg.thresholds)
         return snapshots, active, new_state, transitions
 
@@ -155,7 +225,10 @@ def main(argv: list[str] | None = None) -> int:
             from rich.console import Console
 
             Console().print(render_list_table(snapshots))
+            if proc_collector:
+                proc_collector.stop()
             return _exit_code(snapshots, active)
+        proc_block = _process_vram_payload(proc_collector, cfg, sync=once_mode)
         payload = {
             "snapshots": snapshots,
             "alarms": active,
@@ -163,10 +236,20 @@ def main(argv: list[str] | None = None) -> int:
                 s.get("server"): build_inventory(s) for s in snapshots if s.get("reachable")
             },
         }
+        if proc_block is not None:
+            payload["process_vram"] = proc_block
         if args.json:
             print(json.dumps(payload, indent=2))
         else:
-            print(render_snapshot_plain(snapshots, active))
+            print(
+                render_snapshot_plain(
+                    snapshots,
+                    active,
+                    poll_interval=cfg.poll_interval,
+                    process_vram=proc_block,
+                    proc_vram_interval=cfg.proc_vram_interval,
+                )
+            )
         if args.log:
             append_alarm_log(
                 Path(args.log),
@@ -174,14 +257,24 @@ def main(argv: list[str] | None = None) -> int:
                 transitions=transitions,
                 on_transition_only=False,
             )
+        if proc_collector:
+            proc_collector.stop()
         return _exit_code(snapshots, active)
 
     # Live mode
+    lock = InstanceLock()
+    if not lock.try_acquire(InstanceLock.CONTINUOUS):
+        print("Another ollama-sentinel monitor is already running.", file=sys.stderr)
+        return 1
     renderer = LiveRenderer()
+    last_by_server: dict[str, dict[str, Any]] = {}
 
     def poll_fn():
-        nonlocal state
-        snapshots = _poll(cfg)
+        nonlocal state, last_by_server
+        snapshots = _poll(cfg, last_snapshots=last_by_server or None)
+        for snap in snapshots:
+            if snap.get("reachable"):
+                last_by_server[snap["server"]] = snap
         active, new_state, transitions = _evaluate_all(snapshots, state, cfg.thresholds)
         if args.toast:
             for t in transitions:
@@ -198,9 +291,18 @@ def main(argv: list[str] | None = None) -> int:
         return snapshots, active
 
     try:
-        renderer.run(poll_fn, cfg.poll_interval)
+        renderer.run(
+            poll_fn,
+            cfg.poll_interval,
+            proc_vram_interval=cfg.proc_vram_interval,
+            get_process_vram=lambda: _process_vram_payload(proc_collector, cfg),
+        )
     except KeyboardInterrupt:
-        return 0
+        pass
+    finally:
+        if proc_collector:
+            proc_collector.stop()
+        lock.release()
     return 0
 
 

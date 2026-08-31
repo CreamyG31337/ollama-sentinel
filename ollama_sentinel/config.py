@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,9 @@ class AppConfig:
     servers: list[ServerConfig] = field(default_factory=list)
     state_file: Path | None = None
     server: str | None = None
+    proc_vram: bool = True
+    proc_vram_interval: float = 30.0
+    proc_vram_min_mb: int = 64
 
 
 def parse_dotenv(path: Path) -> dict[str, str]:
@@ -95,12 +99,16 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         paging_polls=int(env.get("PAGING_POLLS", 3)),
         vram_pressure=float(env.get("VRAM_PRESSURE", 0.95)),
     )
+    proc_vram_raw = env.get("PROC_VRAM", "1")
     return AppConfig(
         ollama_url=env.get("OLLAMA_URL", DEFAULT_URL),
         poll_interval=float(env.get("POLL_INTERVAL", 5)),
         thresholds=th,
         gpu_filter=_int_or_none(env.get("GPU")),
         hf_token=env.get("HF_TOKEN") or None,
+        proc_vram=proc_vram_raw not in ("0", "false", "False", "no"),
+        proc_vram_interval=float(env.get("PROC_VRAM_INTERVAL", 30)),
+        proc_vram_min_mb=int(env.get("PROC_VRAM_MIN_MB", 64)),
     )
 
 
@@ -138,9 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--server", help="Pin to one server name")
     p.add_argument("--ollama-url", help="Default Ollama URL")
     p.add_argument("--gui", action="store_true", help="Open Flet window")
-    p.add_argument("--tray", action="store_true", help="Open Flet window + tray icon")
-    p.add_argument("--tray-only", action="store_true",
-                   help="Tray icon only; start hidden, open from the tray menu")
+    p.add_argument(
+        "--start-minimized",
+        action="store_true",
+        help="Start with window hidden (tray icon on Windows)",
+    )
+    p.add_argument("--no-tray", action="store_true", help="Disable system tray icon")
     sub = p.add_subparsers(dest="command")
     sp = sub.add_parser("search", help="Search Hugging Face")
     sp.add_argument("query", nargs="?", default="")
@@ -169,6 +180,13 @@ def resolve_config(args: argparse.Namespace) -> AppConfig:
     servers_path = args.servers_file or Path.cwd() / "servers.json"
     cfg.servers = load_servers(servers_path, cfg.ollama_url)
     return cfg
+
+
+def resolve_gui_options(args: argparse.Namespace) -> tuple[bool, bool]:
+    """Return (tray, start_hidden) for GUI mode."""
+    start_hidden = bool(args.start_minimized)
+    tray = not args.no_tray and sys.platform == "win32"
+    return tray, start_hidden
 
 
 def selected_servers(cfg: AppConfig) -> list[ServerConfig]:

@@ -58,11 +58,18 @@ def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def inventory_summary(rows: list[dict[str, Any]]) -> str:
+def inventory_summary(
+    rows: list[dict[str, Any]],
+    *,
+    free_vram_gb: float | None = None,
+    free_vram_pct: float | None = None,
+) -> str:
     installed = len(rows)
     loaded = sum(1 for r in rows if r.get("loaded"))
     would = sum(1 for r in rows if r.get("would_spill"))
     parts = [f"{installed} installed", f"{loaded} loaded"]
     if any(r.get("would_spill") is not None for r in rows):
         parts.append(f"{would} would spill")
+    if free_vram_gb is not None and free_vram_pct is not None:
+        parts.append(f"free VRAM: {free_vram_gb:.1f} GB ({free_vram_pct:.0f}%)")
     return " | ".join(parts)

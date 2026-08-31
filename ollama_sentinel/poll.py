@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from typing import Any
+
+from ollama_sentinel.telemetry import polled_at_iso
 
 
 DEFAULT_TIMEOUT = 10
@@ -32,6 +35,7 @@ def poll_server(
     attach_gpus: bool = False,
     gpu_filter: int | None = None,
     query_gpus_fn=None,
+    polled_at: float | None = None,
 ) -> dict[str, Any]:
     """Poll one Ollama server. GPU metrics only if attach_gpus is True."""
     snapshot: dict[str, Any] = {
@@ -43,6 +47,7 @@ def poll_server(
         "tags": [],
         "gpus": None,
         "error": None,
+        "stale": False,
     }
 
     version, verr = _get_json(url, "/api/version")
@@ -53,6 +58,9 @@ def poll_server(
         snapshot["error"] = verr or perr or terr or "unreachable"
         return snapshot
 
+    ts = polled_at if polled_at is not None else time.time()
+    snapshot["polled_at"] = polled_at_iso(ts)
+    snapshot["polled_at_ts"] = ts
     snapshot["reachable"] = ps is not None or tags is not None or version is not None
     if version:
         snapshot["version"] = version.get("version")
@@ -72,15 +80,30 @@ def poll_all(
     *,
     gpu_filter: int | None = None,
     query_gpus_fn=None,
+    last_snapshots: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Poll every configured server."""
     local_gpu_data = query_gpus_fn(gpu_filter) if query_gpus_fn else None
+    polled_at = time.time()
 
     results = []
     for srv in servers:
         attach = bool(srv.get("local_gpu")) and local_gpu_data is not None
-        snap = poll_server(srv["url"], srv["name"])
-        if attach:
-            snap["gpus"] = local_gpu_data
+        snap = poll_server(
+            srv["url"],
+            srv["name"],
+            attach_gpus=attach,
+            gpu_filter=gpu_filter,
+            query_gpus_fn=lambda gf: local_gpu_data,
+            polled_at=polled_at,
+        )
+        if not snap.get("reachable") and last_snapshots:
+            prev = last_snapshots.get(srv["name"])
+            if prev and prev.get("reachable"):
+                stale = dict(prev)
+                stale["stale"] = True
+                stale["error"] = snap.get("error")
+                results.append(stale)
+                continue
         results.append(snap)
     return results

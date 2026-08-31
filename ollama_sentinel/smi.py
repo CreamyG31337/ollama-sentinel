@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import subprocess
-from typing import Any
 import sys
+from typing import Any
 
+from ollama_sentinel.telemetry import _parse_numeric, enrich_gpu, mib_to_bytes
+
+GPU_QUERY = (
+    "name,temperature.gpu,fan.speed,utilization.gpu,utilization.memory,"
+    "clocks.sm,clocks.mem,pstate,memory.used,memory.total,memory.reserved,"
+    "power.draw,power.limit,enforced.power.limit,"
+    "clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.sw_power_cap"
+)
 
 
 def _no_window() -> dict:
-    """Keep nvidia-smi from flashing a console window.
-
-    Under pythonw (tray/GUI mode) every subprocess without CREATE_NO_WINDOW
-    pops a visible console. At the default 5s poll interval that is a window
-    flashing every five seconds, which makes tray mode unusable.
-    """
+    """Keep subprocesses from flashing a console window under pythonw."""
     if sys.platform != "win32":
         return {}
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
@@ -23,46 +26,47 @@ def _no_window() -> dict:
     si.wShowWindow = subprocess.SW_HIDE
     return {"creationflags": flags, "startupinfo": si}
 
-def _parse_float(value: str) -> float | None:
+
+def _parse_throttle(value: str) -> str | None:
     value = value.strip()
-    if not value or value == "[N/A]":
+    if value in ("", "[N/A]", "[Not Supported]"):
         return None
-    try:
-        return float(value.replace(",", ""))
-    except ValueError:
-        return None
+    return value
 
 
 def parse_nvidia_smi_csv(text: str) -> list[dict[str, Any]]:
     gpus: list[dict[str, Any]] = []
     for idx, line in enumerate(text.strip().splitlines()):
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 7:
+        if len(parts) < 16:
             continue
-        used = _parse_float(parts[1])
-        total = _parse_float(parts[2])
-        # nvidia-smi reports MiB with nounits
-        mib = 1024 * 1024
-        gpus.append(
-            {
-                "index": idx,
-                "name": parts[0],
-                "memory_used": used * mib if used is not None else None,
-                "memory_total": total * mib if total is not None else None,
-                "utilization": _parse_float(parts[3]),
-                "power_draw": _parse_float(parts[4]),
-                "power_limit": _parse_float(parts[5]),
-                "temperature": _parse_float(parts[6]),
-            }
-        )
+        gpu = {
+            "index": idx,
+            "name": parts[0],
+            "temperature": _parse_numeric(parts[1]),
+            "fan_speed": _parse_numeric(parts[2]),
+            "utilization": _parse_numeric(parts[3]),
+            "memory_utilization": _parse_numeric(parts[4]),
+            "clock_sm": _parse_numeric(parts[5]),
+            "clock_mem": _parse_numeric(parts[6]),
+            "pstate": parts[7] if parts[7] not in ("[N/A]", "[Not Supported]") else None,
+            "memory_used": mib_to_bytes(_parse_numeric(parts[8])),
+            "memory_total": mib_to_bytes(_parse_numeric(parts[9])),
+            "memory_reserved": mib_to_bytes(_parse_numeric(parts[10])),
+            "power_draw": _parse_numeric(parts[11]),
+            "power_limit": _parse_numeric(parts[12]),
+            "power_limit_enforced": _parse_numeric(parts[13]),
+            "throttle_hw_thermal": _parse_throttle(parts[14]),
+            "throttle_sw_power_cap": _parse_throttle(parts[15]),
+        }
+        gpus.append(enrich_gpu(gpu))
     return gpus
 
 
 def query_gpus(gpu_filter: int | None = None) -> list[dict[str, Any]] | None:
     cmd = [
         "nvidia-smi",
-        "--query-gpu=name,memory.used,memory.total,utilization.gpu,"
-        "power.draw,power.limit,temperature.gpu",
+        f"--query-gpu={GPU_QUERY}",
         "--format=csv,noheader,nounits",
     ]
     try:

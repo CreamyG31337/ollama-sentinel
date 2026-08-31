@@ -3,9 +3,8 @@
   Create a Desktop shortcut that opens the ollama-sentinel window.
 
 .DESCRIPTION
-  Uses pythonw.exe so no console window appears, and --gui rather than --tray
-  so it does not add a second tray icon when the logon tray task is already
-  running.
+  Uses pythonw.exe so no console window appears. If the app is already
+  running (tray or hidden), a second launch focuses the existing window.
 
 .EXAMPLE
   pwsh -File tools\install-shortcut.ps1

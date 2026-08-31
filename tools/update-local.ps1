@@ -7,7 +7,7 @@
   immediately and the 15-minute --once task picks them up on its next run with no
   action at all. Two things do NOT self-update:
 
-    1. the long-running --tray process, which holds the old code in memory
+    1. the long-running GUI process (`--gui` / `--gui --start-minimized`), which holds old code in memory
     2. dependencies / entry points, when pyproject.toml changes
 
   This script handles both, then verifies with the test suite.
@@ -49,7 +49,8 @@ if ($Reinstall -or $hash -ne $prev) {
     Write-Host "  deps unchanged -- editable install already live" -ForegroundColor DarkGray
 }
 
-# --- 2. restart the tray so it picks up new code ----------------------------
+# --- 2. restart the GUI/tray task so it picks up new code -------------------
+# Logon task should use: pythonw.exe -m ollama_sentinel --gui --start-minimized
 $task = Get-ScheduledTask -TaskName $trayTask -ErrorAction SilentlyContinue
 if ($task) {
     $info = $task | Get-ScheduledTaskInfo

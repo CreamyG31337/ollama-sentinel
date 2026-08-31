@@ -54,11 +54,13 @@ ollama-sentinel search qwen --sort trendingScore
 # Pull to a server
 ollama-sentinel pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF --server local
 
-# GUI (Linux) or GUI + tray (Windows)
+# GUI (tray on Windows; close hides to tray when tray is enabled)
 ollama-sentinel --gui
-ollama-sentinel --tray          # window + tray; close hides to tray
-ollama-sentinel --tray-only     # start hidden; Open from tray menu or double-click icon
+ollama-sentinel --gui --start-minimized    # autostart / logon; window hidden
+ollama-sentinel --gui --no-tray            # window only (Linux default)
 ```
+
+Only one continuous monitor (GUI or live console) may run at a time. A second `--gui` launch focuses the existing window. `--once` and other short commands are always safe alongside the tray app.
 
 ### Windows Task Scheduler (every 15 min)
 
@@ -76,7 +78,21 @@ Copy `servers.example.json` to `servers.json`. Set `local_gpu: true` only on the
 
 ## Linux
 
-CLI, alarms, HF search, pull, and `--gui` work on Linux. Tray (`--tray`) is best-effort; use `--gui` if the icon fails.
+CLI, alarms, HF search, pull, and `--gui` work on Linux. Tray is enabled by default on Windows; use `--no-tray` if the icon fails.
+
+## Status telemetry
+
+The Status tab (and `--once` / live console) show expanded GPU telemetry from a single `nvidia-smi` call: temperature, fan, clocks, pstate, memory utilization, reserved VRAM, free VRAM, and throttle reasons.
+
+Per-process VRAM attribution runs on a **background thread** (default every 30 s) because Windows `Get-Counter` is ~20× slower than `nvidia-smi`. Disable with `PROC_VRAM=0`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROC_VRAM` | `1` | `0` disables per-process VRAM collection |
+| `PROC_VRAM_INTERVAL` | `30` | Seconds between background process-VRAM polls |
+| `PROC_VRAM_MIN_MB` | `64` | Hide processes below this local VRAM usage |
+
+JSON output (`--once --json`) adds `polled_at` on each snapshot and a top-level `process_vram` block with its own timestamp. Readings older than 3× their interval are marked `STALE`.
 
 ## License
 
