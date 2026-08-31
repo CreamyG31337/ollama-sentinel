@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import flet as ft
 import flet.canvas as cv
@@ -45,6 +46,38 @@ CHART_SPECS: tuple[ChartSpec, ...] = (
         note="30s cadence",
     ),
 )
+
+
+WINDOW_LABELS: dict[int, str] = {
+    300: "5 minutes",
+    900: "15 minutes",
+    3600: "1 hour",
+}
+
+
+def charts_subtitle(
+    store: MetricsStore,
+    *,
+    window_s: float,
+    server: str | None = None,
+    poll_interval: float = 5.0,
+) -> str:
+    """User-facing context for the Charts tab — not implementation detail."""
+    window = WINDOW_LABELS.get(int(window_s), f"{int(window_s)} seconds")
+    target = server or "this server"
+    refresh = f"updates every {int(poll_interval)}s"
+
+    series = store.series("mem_used_pct", window_s=window_s, server=server)
+    if len(series) < 2:
+        return f"VRAM, GPU load, and power for {target} · {refresh} · waiting for data"
+
+    t0 = series[0][0]
+    span = series[-1][0] - t0
+    since = datetime.fromtimestamp(t0).astimezone().strftime("%H:%M:%S")
+    if span < window_s * 0.85:
+        return f"VRAM, GPU load, and power for {target} · {refresh} · since {since}"
+
+    return f"VRAM, GPU load, and power for {target} · last {window} · {refresh}"
 
 
 def _format_axis(val: float, unit: str) -> str:
@@ -230,7 +263,7 @@ def metric_chart_card(spec: ChartSpec, series: list[tuple[float, float]]) -> ft.
     if sample_n < 2:
         body: ft.Control = ft.Container(
             content=ft.Text(
-                "Collecting… (need a few polls)",
+                "Not enough data yet",
                 size=12,
                 color=PALETTE["muted"],
             ),
@@ -272,25 +305,9 @@ def metrics_charts_panel(
             ft.Text("Metrics disabled (set METRICS=1 in .env)", size=12, color=PALETTE["muted"]),
         )
 
-    window_label = {300: "5 min", 900: "15 min", 3600: "1 hour"}.get(int(window_s), f"{int(window_s)}s")
-    cards: list[ft.Control] = [
-        ft.Text(
-            f"History from existing polls — no extra GPU queries · {window_label} window",
-            size=11,
-            color=PALETTE["muted"],
-        ),
-    ]
+    cards: list[ft.Control] = []
     for spec in CHART_SPECS:
         series = store.series(spec.field, window_s=window_s, server=server)
         cards.append(metric_chart_card(spec, series))
 
-    snap = store.snapshot(window_s=window_s)
-    total = sum(snap.get("counts", {}).values())
-    cards.append(
-        ft.Text(
-            f"Buffer: {total} points retained (up to {int(store.retention_s // 60)} min)",
-            size=10,
-            color=PALETTE["muted"],
-        )
-    )
     return ft.Column(cards, spacing=8)

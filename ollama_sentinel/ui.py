@@ -32,7 +32,7 @@ from ollama_sentinel.state import load_state, save_state
 from ollama_sentinel.telemetry import format_poll_age, is_stale
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
-from ollama_sentinel.ui_charts import metrics_charts_panel
+from ollama_sentinel.ui_charts import charts_subtitle, metrics_charts_panel
 from ollama_sentinel.ui_widgets import (
     PALETTE,
     activity_card,
@@ -242,6 +242,7 @@ def run_gui(
         poll_state: dict[str, Any] = {"polled_ts": None, "stale": False, "reachable": True}
         library_host = ft.Column(spacing=8, expand=True)
         charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
+        charts_subtitle_text = ft.Text("", size=12, color=PALETTE["muted"])
         chart_window_s = {"value": 300.0}
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
         discover_state: dict[str, Any] = {
@@ -271,11 +272,18 @@ def run_gui(
 
         def update_charts() -> None:
             if metrics_store is None:
+                charts_subtitle_text.value = "Metrics disabled (set METRICS=1 in .env)"
                 charts_host.controls = [
-                    ft.Text("Metrics disabled (METRICS=0)", size=12, color=PALETTE["muted"]),
+                    ft.Text("Charts unavailable while metrics are off.", size=12, color=PALETTE["muted"]),
                 ]
                 return
             srv = get_server_cfg()
+            charts_subtitle_text.value = charts_subtitle(
+                metrics_store,
+                window_s=chart_window_s["value"],
+                server=srv.name,
+                poll_interval=cfg.poll_interval,
+            )
             charts_host.controls = [
                 metrics_charts_panel(
                     metrics_store,
@@ -705,9 +713,11 @@ def run_gui(
         )
         charts_page = ft.Column(
             [
+                ft.Text("Trends", size=18, weight=ft.FontWeight.BOLD),
+                charts_subtitle_text,
                 ft.Row(
                     [
-                        ft.Text("Window", size=12, color=PALETTE["muted"]),
+                        ft.Text("Range", size=12, color=PALETTE["muted"]),
                         chart_window_pick,
                     ],
                     spacing=8,
