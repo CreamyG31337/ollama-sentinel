@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +11,8 @@ from ollama_sentinel.alarms import AlarmState, evaluate_alarms
 from ollama_sentinel.catalog import search_models, typeahead
 from ollama_sentinel.config import build_parser, resolve_config, selected_servers
 from ollama_sentinel.inventory import build_inventory
+from ollama_sentinel.log import append_alarm_log
 from ollama_sentinel.notify import notify_transition
-from ollama_sentinel.paths import default_hub_cache_path
 from ollama_sentinel.poll import poll_all
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.render import LiveRenderer, render_list_table, render_snapshot_plain
@@ -63,12 +62,6 @@ def _exit_code(snapshots: list[dict[str, Any]], alarms: list[dict[str, Any]]) ->
     if alarms:
         return 1
     return 0
-
-
-def _append_log(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload) + "\n")
 
 
 def cmd_search(args, cfg) -> int:
@@ -175,7 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(render_snapshot_plain(snapshots, active))
         if args.log:
-            _append_log(Path(args.log), payload)
+            append_alarm_log(
+                Path(args.log),
+                alarms=active,
+                transitions=transitions,
+                on_transition_only=False,
+            )
         return _exit_code(snapshots, active)
 
     # Live mode
@@ -191,9 +189,11 @@ def main(argv: list[str] | None = None) -> int:
         save_state(state_path, new_state)
         state = new_state
         if args.log:
-            _append_log(
+            append_alarm_log(
                 Path(args.log),
-                {"snapshots": snapshots, "alarms": active, "ts": time.time()},
+                alarms=active,
+                transitions=transitions,
+                on_transition_only=True,
             )
         return snapshots, active
 

@@ -127,7 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--once", action="store_true", help="Single snapshot and exit")
     p.add_argument("--json", action="store_true", help="JSON output")
     p.add_argument("--list", action="store_true", help="Installed library table")
-    p.add_argument("--log", metavar="PATH", help="Append JSONL log per poll")
+    p.add_argument(
+        "--log",
+        metavar="PATH",
+        help="Append rotating JSONL alarm log (transitions in live mode; active alarms in --once)",
+    )
     p.add_argument("--toast", action="store_true", help="Toast on alarm transitions")
     p.add_argument("--state-file", type=Path, help="Alarm state file")
     p.add_argument("--servers-file", type=Path, help="servers.json path")
