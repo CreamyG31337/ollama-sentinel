@@ -17,3 +17,7 @@ dist/
 build/
 *.egg-info/
 hub-cache.json
+
+# runtime log written by the scheduled task
+sentinel.jsonl
+*.jsonl
