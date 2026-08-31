@@ -56,7 +56,8 @@ ollama-sentinel pull hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF --server local
 
 # GUI (Linux) or GUI + tray (Windows)
 ollama-sentinel --gui
-ollama-sentinel --tray
+ollama-sentinel --tray          # window + tray; close hides to tray
+ollama-sentinel --tray-only     # start hidden; Open from tray menu or double-click icon
 ```
 
 ### Windows Task Scheduler (every 15 min)

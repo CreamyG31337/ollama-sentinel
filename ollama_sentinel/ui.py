@@ -32,24 +32,33 @@ def run_gui(cfg: AppConfig, *, tray: bool = False, start_hidden: bool = False) -
         if tray:
             from ollama_sentinel.tray import start_tray
 
-            def show_window() -> None:
+            async def show_window_async() -> None:
                 page.window.visible = True
                 page.window.skip_task_bar = False
                 page.window.minimized = False
                 page.window.to_front()
                 page.update()
 
-            def hide_window() -> None:
+            async def hide_window_async() -> None:
                 page.window.visible = False
                 page.window.skip_task_bar = True
                 page.update()
 
-            def quit_app() -> None:
+            async def quit_app_async() -> None:
                 icon = tray_icon.get("icon")
                 if icon is not None:
                     icon.stop()
                 page.window.prevent_close = False
                 page.window.destroy()
+
+            def request_show_window() -> None:
+                page.run_task(show_window_async)
+
+            def request_hide_window() -> None:
+                page.run_task(hide_window_async)
+
+            def request_quit_app() -> None:
+                page.run_task(quit_app_async)
 
             # Closing the window hides to tray instead of killing the process --
             # otherwise the tray icon outlives the app that owns it.
@@ -57,10 +66,10 @@ def run_gui(cfg: AppConfig, *, tray: bool = False, start_hidden: bool = False) -
 
             def on_window_event(e) -> None:
                 if getattr(e, "data", None) == "close":
-                    hide_window()
+                    request_hide_window()
 
             page.window.on_event = on_window_event
-            tray_icon["icon"] = start_tray(on_open=show_window, on_quit=quit_app)
+            tray_icon["icon"] = start_tray(on_open=request_show_window, on_quit=request_quit_app)
 
             if start_hidden:
                 page.window.visible = False
