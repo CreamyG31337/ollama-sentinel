@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -76,6 +77,12 @@ class InstanceLock:
         self._mutex: int | None = None
         self._owned = False
 
+    def _mutex_name(self) -> str:
+        if self._base.resolve() == app_data_dir().resolve():
+            return self._MUTEX_NAME
+        digest = hashlib.sha256(str(self._base.resolve()).encode()).hexdigest()[:16]
+        return f"Local\\ollama-sentinel-{digest}"
+
     @staticmethod
     def is_holder_alive(path: Path) -> bool:
         meta = _read_lock_meta(path)
@@ -104,14 +111,14 @@ class InstanceLock:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32
-        mutex = kernel32.CreateMutexW(None, True, self._MUTEX_NAME)
+        mutex = kernel32.CreateMutexW(None, True, self._mutex_name())
         if not mutex:
             return False
         already_exists = kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
         if already_exists:
             kernel32.CloseHandle(mutex)
             if self._clear_stale_lock():
-                mutex = kernel32.CreateMutexW(None, True, self._MUTEX_NAME)
+                mutex = kernel32.CreateMutexW(None, True, self._mutex_name())
                 if not mutex or kernel32.GetLastError() == 183:
                     if mutex:
                         kernel32.CloseHandle(mutex)

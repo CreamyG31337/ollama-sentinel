@@ -9,8 +9,8 @@ from typing import Any
 
 import flet as ft
 
-from ollama_sentinel.alarms import evaluate_alarms, format_expires, gpu_pct
-from ollama_sentinel.catalog import search_models, typeahead
+from ollama_sentinel.alarms import evaluate_alarms
+from ollama_sentinel.catalog import search_models
 from ollama_sentinel.config import AppConfig, selected_servers
 from ollama_sentinel.instance import InstanceLock
 from ollama_sentinel.inventory import build_inventory, inventory_summary
@@ -19,7 +19,16 @@ from ollama_sentinel.proc_vram import ProcessVramCollector
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
-from ollama_sentinel.telemetry import format_gpu_line, format_poll_age, is_stale
+from ollama_sentinel.telemetry import format_poll_age, is_stale
+from ollama_sentinel.ui_widgets import (
+    PALETTE,
+    alarm_banner,
+    gpu_table,
+    library_table,
+    loaded_models_table,
+    process_vram_table,
+    section_card,
+)
 
 
 def _free_vram_summary(gpus: list[dict[str, Any]] | None) -> tuple[float | None, float | None]:
@@ -57,6 +66,7 @@ def run_gui(
         page.theme_mode = ft.ThemeMode.DARK
         page.window.width = 960
         page.window.height = 640
+        page.padding = 12
 
         async def show_window_async() -> None:
             page.window.visible = True
@@ -130,13 +140,14 @@ def run_gui(
             label="Server",
             value=server_names[0] if server_names else None,
             options=[ft.dropdown.Option(n) for n in server_names],
-            width=200,
+            width=220,
         )
-        status_text = ft.Text("Loading…", size=14)
-        poll_footer = ft.Text("", size=12, color=ft.Colors.GREY)
-        gpu_col = ft.Column(spacing=4)
-        proc_vram_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=160)
-        library_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
+        alarm_host = ft.Container()
+        gpu_host = ft.Column(spacing=8)
+        models_host = ft.Column(spacing=8)
+        proc_vram_host = ft.Column(spacing=8)
+        poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
+        library_host = ft.Column(spacing=8, expand=True)
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
         search_field = ft.TextField(label="Search Hugging Face", expand=True)
         pull_status = ft.Text("")
@@ -184,78 +195,50 @@ def run_gui(
                 footer = format_poll_age(polled_ts, now)
                 if stale_poll:
                     poll_footer.value = f"STALE · {footer}"
-                    poll_footer.color = ft.Colors.ORANGE
+                    poll_footer.color = PALETTE["stale"]
                 else:
                     poll_footer.value = f"Updated {footer}"
-                    poll_footer.color = ft.Colors.GREY
+                    poll_footer.color = PALETTE["muted"]
 
-            if not snap.get("reachable"):
-                status_text.value = f"Unreachable: {snap.get('error')}"
-                status_text.color = ft.Colors.RED
-            elif active:
-                status_text.value = "\n".join(a["message"] for a in active)
-                status_text.color = ft.Colors.RED
-            else:
-                status_text.value = "OK — no alarms"
-                status_text.color = ft.Colors.GREEN
+            alarm_host.content = alarm_banner(
+                snap.get("reachable", False),
+                active,
+                error=snap.get("error"),
+            )
 
-            gpu_col.controls.clear()
+            gpu_host.controls.clear()
             for gpu in snap.get("gpus") or []:
-                gpu_col.controls.append(ft.Text(format_gpu_line(gpu), size=12))
+                gpu_host.controls.append(gpu_table(gpu))
 
-            proc_vram_col.controls.clear()
+            models_host.controls.clear()
+            models_card = loaded_models_table(snap.get("models") or [])
+            if models_card is not None:
+                models_host.controls.append(models_card)
+
+            proc_vram_host.controls.clear()
             if proc_collector:
                 pv = proc_collector.get_snapshot()
                 pv_ts = pv.get("polled_at_ts")
-                if pv_ts is not None:
-                    pv_age = format_poll_age(pv_ts, now)
-                    pv_stale = pv.get("stale") or is_stale(pv_ts, cfg.proc_vram_interval, now)
-                    label = f"Process VRAM · {'STALE · ' if pv_stale else ''}{pv_age}"
-                    proc_vram_col.controls.append(
-                        ft.Text(label, size=12, color=ft.Colors.ORANGE if pv_stale else ft.Colors.GREY)
+                pv_age = format_poll_age(pv_ts, now) if pv_ts is not None else None
+                pv_stale = bool(
+                    pv.get("stale")
+                    or (pv_ts is not None and is_stale(pv_ts, cfg.proc_vram_interval, now))
+                )
+                proc_vram_host.controls.append(
+                    process_vram_table(
+                        pv.get("rows") or [],
+                        stale=pv_stale,
+                        age_text=pv_age,
+                        error=pv.get("error"),
                     )
-                elif pv.get("error"):
-                    proc_vram_col.controls.append(ft.Text(f"Process VRAM error: {pv['error']}", size=12))
-                rows = pv.get("rows") or []
-                if not rows and not pv.get("error"):
-                    proc_vram_col.controls.append(ft.Text("(no processes above threshold)", size=12))
-                for row in rows:
-                    local_gb = row.get("bytes", 0) / 1e9
-                    non_local = row.get("non_local_bytes")
-                    if non_local is not None:
-                        line = (
-                            f"{row.get('pid')} {row.get('name')}: "
-                            f"{local_gb:.2f} GB local, {non_local / 1e9:.2f} GB non-local"
-                        )
-                    else:
-                        line = f"{row.get('pid')} {row.get('name')}: {local_gb:.2f} GB"
-                    proc_vram_col.controls.append(ft.Text(line, size=12))
+                )
 
-            library_col.controls.clear()
+            library_host.controls.clear()
             inv = build_inventory(snap)
             free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
-            library_col.controls.append(
-                ft.Text(
-                    inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct),
-                    weight=ft.FontWeight.BOLD,
-                )
-            )
-            for row in inv:
-                fit = ""
-                if row.get("loaded"):
-                    fit = f"{row.get('gpu_pct')}% GPU"
-                elif row.get("would_spill"):
-                    fit = "would spill"
-                elif row.get("would_spill") is False:
-                    fit = "fits"
-                library_col.controls.append(
-                    ft.ListTile(
-                        title=ft.Text(row["name"]),
-                        subtitle=ft.Text(
-                            f"{row['size_gb']:.1f} GB · {'loaded' if row['loaded'] else 'idle'} · {fit}"
-                        ),
-                    )
-                )
+            summary = inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)
+            library_host.controls.append(section_card("Library", library_table(inv), subtitle=summary))
+
             page.update()
 
         def do_search(_=None) -> None:
@@ -311,21 +294,26 @@ def run_gui(
         status_page = ft.Column(
             [
                 current_server,
-                status_text,
-                ft.Text("GPU", weight=ft.FontWeight.BOLD),
-                gpu_col,
-                ft.Text("Process VRAM", weight=ft.FontWeight.BOLD),
-                proc_vram_col,
+                alarm_host,
+                gpu_host,
+                models_host,
+                proc_vram_host,
                 poll_footer,
                 ft.ElevatedButton("Refresh", on_click=refresh),
             ],
             expand=True,
             scroll=ft.ScrollMode.AUTO,
+            spacing=10,
         )
-        library_page = ft.Column([library_col, ft.ElevatedButton("Refresh", on_click=refresh)], expand=True)
+        library_page = ft.Column(
+            [library_host, ft.ElevatedButton("Refresh", on_click=refresh)],
+            expand=True,
+            spacing=10,
+        )
         discover_page = ft.Column(
             [search_field, ft.ElevatedButton("Search", on_click=do_search), pull_status, discover_col],
             expand=True,
+            spacing=10,
         )
         pages = [status_page, library_page, discover_page]
 
@@ -337,7 +325,7 @@ def run_gui(
                 ft.NavigationRailDestination(icon=ft.Icons.SEARCH, label="Discover"),
             ],
         )
-        content_area = ft.Container(content=status_page, expand=True)
+        content_area = ft.Container(content=status_page, expand=True, padding=ft.padding.only(left=8))
 
         def on_nav(e):
             content_area.content = pages[int(e.control.selected_index)]
