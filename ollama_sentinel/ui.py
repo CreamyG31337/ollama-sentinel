@@ -29,6 +29,7 @@ from ollama_sentinel.advisor import (
 )
 from ollama_sentinel.inventory import build_inventory, enrich_inventory_rows, inventory_summary
 from ollama_sentinel.poll import poll_all
+from ollama_sentinel.refresh_guard import RefreshGuard
 from ollama_sentinel.net_errors import format_network_error
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.proc_vram import ProcessVramCollector
@@ -252,6 +253,10 @@ def run_gui(
         last_advisories: list = []
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
         poll_state: dict[str, Any] = {"polled_ts": None, "stale": False, "reachable": True}
+        # Guards against a slow poll for the previous server landing after the
+        # user has already switched away, which used to leave the panels showing
+        # one server's data under another server's name.
+        refresh_guard = RefreshGuard()
         library_host = ft.Column(spacing=8, expand=True)
         charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
         charts_subtitle_text = ft.Text("", size=12, color=PALETTE["muted"])
@@ -414,6 +419,7 @@ def run_gui(
 
         def refresh(_=None) -> None:
             srv = get_server_cfg()
+            my_seq = refresh_guard.issue()
             target = [
                 {
                     "name": srv.name,
@@ -446,6 +452,12 @@ def run_gui(
                     "polled_at": polled_at_iso(now),
                     "stale": False,
                 }
+            # Poll finished. Apply it only if it is still what the user is
+            # looking at and nothing newer has already landed; otherwise a
+            # 30s timeout on an unreachable host would overwrite fresh data.
+            if not refresh_guard.accept(my_seq, srv.name, current_server.value):
+                return
+
             last_snap.clear()
             last_snap.update(snap)
             reachable = bool(snap.get("reachable"))
@@ -937,7 +949,25 @@ def run_gui(
         )
 
         def on_server_change(_e) -> None:
-            refresh()
+            """Switch servers without freezing the window.
+
+            refresh() does three HTTP calls (10s timeout each) plus an
+            /api/show per installed model, so running it on the event thread
+            locked the UI for up to half a minute on an unreachable host.
+            Every other I/O path in this file already uses a worker thread.
+            """
+            name = current_server.value
+            models_host.controls.clear()
+            models_host.controls.append(
+                ft.Text(f"Loading {name}...", size=12, color=PALETTE["muted"])
+            )
+            gpu_host.controls.clear()
+            proc_vram_host.controls.clear()
+            activity_host.content = None
+            alarm_host.content = None
+            last_snap.clear()
+            page.update()
+            threading.Thread(target=refresh, daemon=True).start()
 
         current_server.on_change = on_server_change
 
