@@ -1,0 +1,142 @@
+{
+  "models": [
+    {
+      "name": "bge-m3:latest",
+      "model": "bge-m3:latest",
+      "modified_at": "2026-08-22T17:09:34.2801905-07:00",
+      "size": 1157672605,
+      "digest": "7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "bert",
+        "families": [
+          "bert"
+        ],
+        "parameter_size": "566.70M",
+        "quantization_level": "F16",
+        "context_length": 8192,
+        "embedding_length": 1024
+      },
+      "capabilities": [
+        "embedding"
+      ]
+    },
+    {
+      "name": "granite-embedding:278m",
+      "model": "granite-embedding:278m",
+      "modified_at": "2026-08-22T17:09:34.4343301-07:00",
+      "size": 562777301,
+      "digest": "1a37926bf842899cbf90583e3932f3820548716d9d07661ba622199ffe95c552",
+      "details": {
+        "parent_model": "/Users/administrator/.ollama/models/blobs/sha256-a658c903bf83a9d84fe1b9869874229ddfdfc1c88b04f958f17dd24e243d262c",
+        "format": "gguf",
+        "family": "bert",
+        "families": [
+          "bert"
+        ],
+        "parameter_size": "277.45M",
+        "quantization_level": "F16",
+        "context_length": 512,
+        "embedding_length": 768
+      },
+      "capabilities": [
+        "embedding"
+      ]
+    },
+    {
+      "name": "nomic-embed-text:latest",
+      "model": "nomic-embed-text:latest",
+      "modified_at": "2026-08-22T17:09:34.5758169-07:00",
+      "size": 274302450,
+      "digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "nomic-bert",
+        "families": [
+          "nomic-bert"
+        ],
+        "parameter_size": "137M",
+        "quantization_level": "F16",
+        "context_length": 2048,
+        "embedding_length": 768
+      },
+      "capabilities": [
+        "embedding"
+      ]
+    },
+    {
+      "name": "qwen3.8:27b-heretic",
+      "model": "qwen3.8:27b-heretic",
+      "modified_at": "2026-08-22T12:32:50.444703-07:00",
+      "size": 16547391262,
+      "digest": "26f7890ad7fc534d25d70601d710107aa70050bcdceb02474db9601dd2345aa3",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen35",
+        "families": [
+          "qwen35"
+        ],
+        "parameter_size": "26.9B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 262144,
+        "embedding_length": 5120
+      },
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ]
+    },
+    {
+      "name": "qwen3.8:27b-mtp-q4_K_M",
+      "model": "qwen3.8:27b-mtp-q4_K_M",
+      "modified_at": "2026-08-22T12:32:50.5695477-07:00",
+      "size": 17741872154,
+      "digest": "22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643",
+      "details": {
+        "parent_model": "qwen3.8:27b-q4_K_M",
+        "format": "gguf",
+        "family": "qwen35",
+        "families": [
+          "qwen35"
+        ],
+        "parameter_size": "27.3B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 262144,
+        "embedding_length": 5120
+      },
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking",
+        "vision"
+      ]
+    },
+    {
+      "name": "jikepjikep_16HEX/qwen3.6-35b-nightshift-heretic-uncensored-medic-a3b-moe-q4:latest",
+      "model": "jikepjikep_16HEX/qwen3.6-35b-nightshift-heretic-uncensored-medic-a3b-moe-q4:latest",
+      "modified_at": "2026-08-22T12:32:50.7138925-07:00",
+      "size": 22066043598,
+      "digest": "8dee4028ee72da2ea337da33cac4177de401b9fb6773262f82b41fc91bee30c3",
+      "details": {
+        "parent_model": "jikepjikep_16HEX/qwen3.6-35b-nightshift-heretic-uncensored-medic-a3b-moe-q4:latest",
+        "format": "gguf",
+        "family": "qwen35moe",
+        "families": [
+          "qwen35moe"
+        ],
+        "parameter_size": "34.7B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 262144,
+        "embedding_length": 2048
+      },
+      "capabilities": [
+        "completion",
+        "vision"
+      ]
+    }
+  ]
+}
