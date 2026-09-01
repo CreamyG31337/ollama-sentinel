@@ -84,10 +84,16 @@ def poll_all(
     *,
     gpu_filter: int | None = None,
     query_gpus_fn=None,
+    polled_at: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Poll every configured server."""
+    """Poll every configured server.
+
+    Each snapshot is stamped with the time *its own* poll finished, not a single
+    timestamp taken before the loop. A shared start-stamp made every server look
+    as old as the whole cycle took, so one slow or unreachable host (which pays a
+    full connect timeout) dragged every healthy host past the staleness threshold.
+    """
     local_gpu_data = query_gpus_fn(gpu_filter) if query_gpus_fn else None
-    polled_at = time.time()
 
     results = []
     for srv in servers:

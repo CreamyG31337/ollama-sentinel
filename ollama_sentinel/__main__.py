@@ -568,6 +568,7 @@ def main(argv: list[str] | None = None) -> int:
                     poll_interval=cfg.poll_interval,
                     process_vram=proc_block,
                     proc_vram_interval=cfg.proc_vram_interval,
+                    once=True,
                 )
             )
         if args.log:
