@@ -183,6 +183,11 @@ unknown rows count for nothing.
 
 ## BUG 3 — `STALE (15s ago)` on a fresh `--once`
 
+> **STATUS 2026-08-31: FIXED** on branch `fix/stale-and-encoding` (`ec5fa61`), not yet merged.
+> Each snapshot is now stamped at its own poll completion instead of sharing one pre-loop
+> timestamp, and the `--once` call site wires the `once` flag `render.py` already accepted.
+> Do not start this.
+
 **Symptom.** A single fresh snapshot is labelled STALE.
 
 **What is already known — do not re-derive this** (this supersedes an earlier, wrong note in
@@ -213,7 +218,18 @@ still does. Add a test at the unit level for whatever the actual mechanism turns
 
 ---
 
-## BUG 4 — console encoding mojibake
+## BUG 4 — console encoding mojibake  ~~(NOT A BUG)~~
+
+> **STATUS 2026-08-31: WITHDRAWN — this was my error, not a defect.** The app writes the
+> separators correctly: a redirected run contains byte `0xB7` (cp1252 middle dot) and no literal
+> `?` anywhere. The `?` glyphs in the transcript above came from the tool that captured the
+> output decoding cp1252 bytes as UTF-8. **Do not 'fix' this** — changing the separators or
+> forcing an encoding would be churn against working code.
+>
+> One genuine, much smaller point survives: `—` (U+2014, used as the empty-value placeholder)
+> is not encodable in some OEM code pages such as cp437, so a redirect under those locales could
+> raise `UnicodeEncodeError`. That is a latent robustness nit, not the reported symptom, and is
+> worth at most a defensive `errors="replace"` if it ever actually bites someone.
 
 **Symptom.** `·` and `°` render as `?` on the Windows console — e.g.
 `ctx 65,536 ? Q4_K_M ? qwen35` and `temp 29?C`.
@@ -298,8 +314,8 @@ been made:
 
 - [x] Bug 1 fixed in both renderers, with the attribution assertion test
 - [x] Bug 2 fixed, unknown fit distinguished from "fits" everywhere it surfaces
-- [ ] Bug 3 root-caused (not threshold-tweaked) and covered
-- [ ] Bug 4 fixed, including the redirected-stdout case
+- [x] Bug 3 root-caused (not threshold-tweaked) and covered — branch `fix/stale-and-encoding`
+- [x] Bug 4 withdrawn — not a defect; see status note
 - [ ] Task 5 tests added
 - [ ] `python -m pytest tests/ -q` green, ≥147 tests (169 as of 2026-08-31)
 - [ ] Manual check: `--once` against two servers shows no local PIDs under the remote host, no
