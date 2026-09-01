@@ -92,6 +92,9 @@ absorb someone else's uncommitted work into your commits.
 
 ## BUG 1 — local process data is attributed to remote servers (highest priority)
 
+> **STATUS 2026-08-31: FIXED** in `cb20889`. Verified: a `--once` across four servers shows no
+> Activity or Process VRAM block under any remote host. Left here for the record; do not redo.
+
 **Symptom.** In the `[ubuntu-rx6800]` block, sentinel prints `runner pid 65220 21.5 GB` and
 `65220 llama-server.exe: 21.50 GB local`. Those are processes on **this Windows desktop**. The
 remote host is a Linux box whose Ollama runs in a Docker container; it has no such PIDs, and
@@ -141,6 +144,9 @@ activity gets local data synthesised into it.
 
 ## BUG 2 — `0 would spill` on a host with no GPU data
 
+> **STATUS 2026-08-31: FIXED** in `cb20889`. `inventory.py:128` now emits `fit unknown`, and the
+> AMD host renders `20 installed | 2 loaded | fit unknown`. Left here for the record.
+
 **Symptom.** The AMD host reports `20 installed | 2 loaded | 0 would spill` while holding
 `dolphin-mixtral:8x7b` at **26.44 GB on a 16 GB card**. Zero is not merely imprecise, it is the
 most dangerous possible answer: it reads as "everything fits".
@@ -179,16 +185,25 @@ unknown rows count for nothing.
 
 **Symptom.** A single fresh snapshot is labelled STALE.
 
-**What is already known — do not re-derive this:**
+**What is already known — do not re-derive this** (this supersedes an earlier, wrong note in
+this file that claimed the age was a constant 15s; it is not, it scales with how long the poll
+takes):
 
 - It appears **only with two or more servers**. Pinning `--server cr-desktop-3090` makes it vanish.
-- The reported age is a **constant 15s regardless of `--interval`** (tested at 5, 20 and 60). So it
-  is not the `is_stale()` threshold of `3 * interval` at `telemetry.py:167` — that would scale.
-- `15` is suspicious: both `proc_vram.py:54` and `smi.py:74` use `timeout=15`, and
-  `proc_vram.py:207` sets `self._cache["stale"] = True` on its own cache dict.
-- The plain renderer checks `snap.get("stale") or is_stale(...)` at `render.py:117`, so a `stale`
-  flag is likely being *set* rather than computed — plausibly a cache dict leaking into, or being
-  confused with, the server snapshot.
+- The reported age **tracks total poll duration, not `--interval`**. Measured: 2 servers -> 15s;
+  4 servers (2 of them unreachable, so each must hit its connect timeout) -> **55-68s**.
+- `poll_all()` stamps `polled_at = time.time()` **once, before the loop** (`poll.py:89`) and shares
+  that single timestamp across every snapshot. Everything after that stamp — the remaining servers'
+  HTTP calls (`DEFAULT_TIMEOUT = 10` each, and unreachable hosts pay it in full), then
+  `proc_vram` collection (`timeout=15` at `proc_vram.py:54`) — elapses before anything renders.
+- So by render time, `now - polled_at` legitimately exceeds `3 * interval` (15s at the default
+  interval of 5.0) even though every snapshot is as fresh as it can be. The staleness test is
+  measuring **the app's own polling latency** and calling it staleness.
+
+**Therefore the fix is about *what* is timed, not the threshold.** Options worth weighing: stamp
+each snapshot with its own completion time rather than one shared start time; or compare against
+poll *completion* rather than poll *start*; or exclude unreachable servers from the shared stamp.
+Whichever you choose, an unreachable host must not be able to make healthy hosts look stale.
 
 **Fix.** Trace where `stale` and `polled_at` reach the header for the multi-server path, and make a
 snapshot polled moments ago never render as stale. Do not paper over it by raising the threshold.
@@ -281,12 +296,12 @@ been made:
 
 ## Definition of done
 
-- [ ] Bug 1 fixed in both renderers, with the attribution assertion test
-- [ ] Bug 2 fixed, unknown fit distinguished from "fits" everywhere it surfaces
+- [x] Bug 1 fixed in both renderers, with the attribution assertion test
+- [x] Bug 2 fixed, unknown fit distinguished from "fits" everywhere it surfaces
 - [ ] Bug 3 root-caused (not threshold-tweaked) and covered
 - [ ] Bug 4 fixed, including the redirected-stdout case
 - [ ] Task 5 tests added
-- [ ] `python -m pytest tests/ -q` green, ≥147 tests
+- [ ] `python -m pytest tests/ -q` green, ≥147 tests (169 as of 2026-08-31)
 - [ ] Manual check: `--once` against two servers shows no local PIDs under the remote host, no
       `0 would spill`, no STALE, and correct `·` separators
 - [ ] One commit per bug, message explaining the *observed wrong behaviour*, not just the change
