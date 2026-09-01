@@ -40,6 +40,7 @@ from ollama_sentinel.advisor import (
 )
 from ollama_sentinel.client_config import (
     installed_model_names,
+    inventory_is_complete,
     load_client_config,
     missing_client_models,
 )
@@ -229,7 +230,9 @@ def _gather_advisories(
     cache = show_cache or ShowCache(ttl=cfg.show_cache_ttl)
     clients = load_client_config(cfg.client_config)
     installed = installed_model_names(snapshots)
-    client_missing = missing_client_models(clients, installed)
+    client_missing = missing_client_models(
+        clients, installed, inventory_complete=inventory_is_complete(snapshots)
+    )
     log_cfg, keep_alive = _doctor_log_cfg()
 
     findings: list[AdvisorFinding] = []

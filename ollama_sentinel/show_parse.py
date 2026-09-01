@@ -9,9 +9,21 @@ from typing import Any
 FILE_TYPE_LABELS: dict[int, str] = {
     0: "F32",
     1: "F16",
+    2: "Q4_0",
+    3: "Q4_1",
     7: "Q8_0",
-    8: "Q8_0",
+    8: "Q5_0",
+    9: "Q5_1",
+    10: "Q2_K",
+    11: "Q3_K_S",
+    12: "Q3_K_M",
+    13: "Q3_K_L",
+    14: "Q4_K_S",
     15: "Q4_K_M",
+    16: "Q5_K_S",
+    17: "Q5_K_M",
+    18: "Q6_K",
+    23: "IQ3_XXS",
 }
 
 # Approximate bits per weight for tensor footprint sums (good enough for fit advisories)
@@ -19,8 +31,8 @@ TENSOR_BITS: dict[str, float] = {
     "F32": 32.0,
     "F16": 16.0,
     "BF16": 16.0,
-    "Q8_0": 8.0,
-    "Q8_1": 8.5,
+    "Q8_0": 8.5,
+    "Q8_1": 9.0,
     "Q6_K": 6.5625,
     "Q5_K": 5.5,
     "Q5_0": 5.5,
@@ -30,10 +42,10 @@ TENSOR_BITS: dict[str, float] = {
     "Q4_1": 4.5,
     "Q4_K_M": 4.5,
     "Q4_K_S": 4.5,
-    "Q3_K": 3.5,
-    "Q3_K_M": 3.5,
-    "Q3_K_S": 3.5,
-    "Q2_K": 2.5,
+    "Q3_K": 3.4375,
+    "Q3_K_M": 3.4375,
+    "Q3_K_S": 3.4375,
+    "Q2_K": 2.625,
     "IQ3_XXS": 3.06,
     "IQ3_S": 3.44,
     "IQ4_XS": 4.25,
@@ -94,7 +106,10 @@ def tensor_weight_bytes(tensors: list[dict[str, Any]] | None) -> int | None:
             elems *= int(dim)
         bits = TENSOR_BITS.get(typ)
         if bits is None:
-            continue
+            # Refuse to guess. Skipping unknown tensors would return a total that
+            # looks authoritative while being too small, and an undercounted
+            # footprint makes a model look like it fits when it does not.
+            return None
         total_bits += elems * bits
         counted += 1
     if counted == 0:
@@ -113,8 +128,32 @@ def quant_from_show(show: dict[str, Any]) -> str | None:
         return FILE_TYPE_LABELS[ft]
     tensors = show.get("tensors") or []
     if tensors:
-        return str(tensors[0].get("type") or "") or None
+        return _dominant_tensor_type(tensors)
     return None
+
+
+def _dominant_tensor_type(tensors: list[dict[str, Any]]) -> str | None:
+    """The quantised type covering the most elements.
+
+    tensors[0] is usually `output.weight`, which is commonly stored at a higher
+    precision than the body of the model (Q6_K inside a Q4_K_M model), so taking
+    the first entry mislabels the quant.
+    """
+    weight: dict[str, int] = {}
+    for t in tensors:
+        typ = (t.get("type") or "").upper()
+        shape = t.get("shape")
+        if not typ or not shape:
+            continue
+        if typ in ("F32", "F16", "BF16"):
+            continue  # norms and biases, never the model's quant
+        elems = 1
+        for dim in shape:
+            elems *= int(dim)
+        weight[typ] = weight.get(typ, 0) + elems
+    if not weight:
+        return None
+    return max(weight.items(), key=lambda kv: kv[1])[0]
 
 
 def mtp_layers_from_show(show: dict[str, Any]) -> int | None:

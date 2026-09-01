@@ -29,6 +29,16 @@ def load_client_config(path: Path | None) -> list[dict[str, Any]]:
     return out
 
 
+def normalize_tag(name: str) -> str:
+    """Ollama's implicit `:latest`, made explicit.
+
+    `bge-m3` and `bge-m3:latest` are the same model, but a client config will
+    often write the short form while /api/tags always reports the long one.
+    """
+    name = name.strip()
+    return name if ":" in name else f"{name}:latest"
+
+
 def installed_model_names(snapshots: list[dict[str, Any]]) -> set[str]:
     names: set[str] = set()
     for snap in snapshots:
@@ -37,19 +47,41 @@ def installed_model_names(snapshots: list[dict[str, Any]]) -> set[str]:
         for tag in snap.get("tags") or []:
             n = tag.get("name") or tag.get("model")
             if n:
-                names.add(n)
+                names.add(normalize_tag(str(n)))
     return names
+
+
+def inventory_is_complete(snapshots: list[dict[str, Any]]) -> bool:
+    """True only when every configured server answered.
+
+    With a host down we cannot know what it holds, so "this model is installed
+    nowhere" is unprovable. Optional servers (a gaming rig that is deliberately
+    off) do not count against completeness.
+    """
+    for snap in snapshots:
+        if not snap.get("reachable") and not snap.get("optional"):
+            return False
+    return True
 
 
 def missing_client_models(
     clients: list[dict[str, Any]],
     installed: set[str],
+    *,
+    inventory_complete: bool = True,
 ) -> list[tuple[str, str]]:
-    """Return (client_name, model_name) pairs not in installed set."""
+    """Return (client_name, model_name) pairs not in the installed set.
+
+    Returns nothing when the inventory is incomplete: an unreachable server
+    would otherwise make every model it holds look missing, which is the kind
+    of false alarm that trains people to ignore the tool.
+    """
+    if not inventory_complete:
+        return []
     missing: list[tuple[str, str]] = []
     for client in clients:
         cname = client.get("name") or "client"
         for model in client.get("models") or []:
-            if model not in installed:
+            if normalize_tag(str(model)) not in installed:
                 missing.append((cname, model))
     return missing

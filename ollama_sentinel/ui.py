@@ -474,8 +474,14 @@ def run_gui(
                     show_by_model = show_cache.fetch_all(snap["url"], names)
                     log_cfg, keep_alive = advisor_log_context()
                     clients = load_client_config(cfg.client_config)
+                    # The GUI shows one server at a time, so a model absent
+                    # here may simply live on another host. Absence is not
+                    # provable from a single snapshot; the CLI, which polls
+                    # every server, is what reports this advisory.
                     client_missing = missing_client_models(
-                        clients, installed_model_names([snap])
+                        clients,
+                        installed_model_names([snap]),
+                        inventory_complete=False,
                     )
                     advisor_findings = evaluate_advisories(
                         snap,
