@@ -41,7 +41,37 @@ def fit_label(row: dict[str, Any]) -> tuple[str, str | None]:
         return "would spill", PALETTE["warn"]
     if row.get("would_spill") is False:
         return "fits", PALETTE["muted"]
+    if "would_spill" in row and row.get("would_spill") is None:
+        return "fit unknown", PALETTE["muted"]
     return "—", None
+
+
+def advisory_summary(findings: list[Any]) -> str:
+    """One-line advisory hint for a library row."""
+    if not findings:
+        return "—"
+    parts: list[str] = []
+    for f in findings[:2]:
+        sev = getattr(f, "severity", "info")
+        fid = getattr(f, "id", "")
+        token = fid.rsplit(":", 1)[-1] if fid else getattr(f, "category", "?")
+        if sev == "warn":
+            parts.append(token)
+        elif sev == "unknown":
+            parts.append("no data")
+    if len(findings) > 2:
+        parts.append(f"+{len(findings) - 2}")
+    return ", ".join(parts) if parts else "info"
+
+
+def advisory_color(findings: list[Any]) -> str | None:
+    if any(getattr(f, "severity", "") == "warn" for f in findings):
+        return PALETTE["warn"]
+    if any(getattr(f, "severity", "") == "unknown" for f in findings):
+        return PALETTE["stale"]
+    if findings:
+        return PALETTE["muted"]
+    return None
 
 
 def _metric_table(rows: list[tuple[str, str]], *, footer: str | None = None) -> ft.DataTable:
@@ -330,13 +360,17 @@ def library_table(
     rows: list[dict[str, Any]],
     *,
     on_unload: Callable[[str], None] | None = None,
+    advisories_by_model: dict[str, list[Any]] | None = None,
 ) -> ft.Control:
+    advisories_by_model = advisories_by_model or {}
     sorted_rows = sorted(rows, key=lambda r: (not r.get("loaded"), r.get("name") or ""))
     data_rows: list[ft.DataRow] = []
+    show_advisory = bool(advisories_by_model)
     for row in sorted_rows:
         fit_text, fit_color = fit_label(row)
         state = "loaded" if row.get("loaded") else "idle"
         state_color = PALETTE["ok"] if row.get("loaded") else PALETTE["muted"]
+        model_findings = advisories_by_model.get(row["name"]) or []
         cells = [
             _cell(row["name"]),
             _cell(inventory_detail_line(row)),
@@ -344,6 +378,9 @@ def library_table(
             _cell(state, color=state_color),
             _cell(fit_text, color=fit_color),
         ]
+        if show_advisory:
+            adv_text = advisory_summary(model_findings)
+            cells.append(_cell(adv_text, color=advisory_color(model_findings)))
         if on_unload and row.get("loaded"):
             cells.append(
                 _action_cell(
@@ -364,6 +401,8 @@ def library_table(
         ft.DataColumn(ft.Text("State", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("Fit", size=12, weight=ft.FontWeight.BOLD)),
     ]
+    if show_advisory:
+        columns.append(ft.DataColumn(ft.Text("Advisory", size=12, weight=ft.FontWeight.BOLD)))
     if on_unload:
         columns.append(ft.DataColumn(ft.Text("", size=12)))
     table = ft.DataTable(

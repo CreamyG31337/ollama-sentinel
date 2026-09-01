@@ -35,6 +35,32 @@ def inventory_detail_line(row: dict[str, Any]) -> str:
     return " · ".join(parts) if parts else "—"
 
 
+def enrich_inventory_rows(
+    rows: list[dict[str, Any]],
+    show_by_model: dict[str, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Merge /api/show metadata into inventory rows."""
+    if not show_by_model:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        r = dict(row)
+        show = show_by_model.get(r["name"]) or {}
+        if show.get("error"):
+            r["show_error"] = show["error"]
+        else:
+            if show.get("quantization"):
+                r["quantization"] = show["quantization"]
+            if show.get("weight_bytes"):
+                r["weight_bytes"] = show["weight_bytes"]
+                r["weight_gb"] = show["weight_bytes"] / 1e9
+            for key in ("mtp_layers", "draft_num_predict", "requires", "has_vision"):
+                if show.get(key) is not None:
+                    r[key] = show[key]
+        out.append(r)
+    return out
+
+
 def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Join /api/tags with /api/ps and optional free VRAM."""
     loaded_by_name: dict[str, dict[str, Any]] = {}
@@ -78,6 +104,11 @@ def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             row["would_spill"] = False if free is not None else None
         rows.append(row)
 
+    gpu_known = snapshot.get("gpu_data_available")
+    if gpu_known is False:
+        for row in rows:
+            row["would_spill"] = None
+
     return rows
 
 
@@ -91,8 +122,10 @@ def inventory_summary(
     loaded = sum(1 for r in rows if r.get("loaded"))
     would = sum(1 for r in rows if r.get("would_spill"))
     parts = [f"{installed} installed", f"{loaded} loaded"]
-    if any(r.get("would_spill") is not None for r in rows):
+    if any(r.get("would_spill") is True for r in rows):
         parts.append(f"{would} would spill")
+    elif any(r.get("would_spill") is None for r in rows):
+        parts.append("fit unknown")
     if free_vram_gb is not None and free_vram_pct is not None:
         parts.append(f"free VRAM: {free_vram_gb:.1f} GB ({free_vram_pct:.0f}%)")
     return " | ".join(parts)

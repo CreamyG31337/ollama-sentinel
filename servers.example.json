@@ -9,6 +9,12 @@
       "name": "other",
       "url": "http://127.0.0.1:11435",
       "local_gpu": false
+    },
+    {
+      "name": "gaming-pc",
+      "url": "http://100.69.126.9:11434",
+      "local_gpu": true,
+      "optional": true
     }
   ]
 }

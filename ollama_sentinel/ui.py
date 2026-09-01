@@ -21,12 +21,19 @@ from ollama_sentinel.doctor import (
     run_doctor,
 )
 from ollama_sentinel.instance import InstanceLock
-from ollama_sentinel.inventory import build_inventory, inventory_summary
+from ollama_sentinel.advisor import (
+    advisories_for_model,
+    advisor_log_context,
+    evaluate_advisories,
+    evaluate_advisor_alarms,
+)
+from ollama_sentinel.inventory import build_inventory, enrich_inventory_rows, inventory_summary
 from ollama_sentinel.poll import poll_all
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.proc_vram import ProcessVramCollector
 from ollama_sentinel.restart import spawn_restart
 from ollama_sentinel.unload import unload_models
+from ollama_sentinel.show import ShowCache
 from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
 from ollama_sentinel.telemetry import format_poll_age, is_stale
@@ -238,6 +245,9 @@ def run_gui(
         proc_vram_host = ft.Column(spacing=8)
         gaming_status = ft.Text("", size=12, color=PALETTE["muted"])
         doctor_status = ft.Text("", size=12, color=PALETTE["muted"])
+        advisor_status = ft.Text("", size=12, color=PALETTE["muted"])
+        show_cache = ShowCache(ttl=cfg.show_cache_ttl) if cfg.advisor else None
+        last_advisories: list = []
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
         poll_state: dict[str, Any] = {"polled_ts": None, "stale": False, "reachable": True}
         library_host = ft.Column(spacing=8, expand=True)
@@ -400,7 +410,14 @@ def run_gui(
 
         def refresh(_=None) -> None:
             srv = get_server_cfg()
-            target = [{"name": srv.name, "url": srv.url, "local_gpu": srv.local_gpu}]
+            target = [
+                {
+                    "name": srv.name,
+                    "url": srv.url,
+                    "local_gpu": srv.local_gpu,
+                    "optional": srv.optional,
+                }
+            ]
             snap = poll_all(
                 target,
                 gpu_filter=cfg.gpu_filter,
@@ -415,6 +432,42 @@ def run_gui(
 
             state = load_state(cfg.state_file)
             active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
+
+            advisor_findings: list = []
+            show_by_model: dict[str, dict[str, Any]] = {}
+            if cfg.advisor and show_cache is not None and reachable:
+                try:
+                    from ollama_sentinel.client_config import (
+                        installed_model_names,
+                        load_client_config,
+                        missing_client_models,
+                    )
+
+                    names = [
+                        t.get("name") or t.get("model")
+                        for t in snap.get("tags") or []
+                        if t.get("name") or t.get("model")
+                    ]
+                    show_by_model = show_cache.fetch_all(snap["url"], names)
+                    log_cfg, keep_alive = advisor_log_context()
+                    clients = load_client_config(cfg.client_config)
+                    client_missing = missing_client_models(
+                        clients, installed_model_names([snap])
+                    )
+                    advisor_findings = evaluate_advisories(
+                        snap,
+                        show_by_model=show_by_model,
+                        log_cfg=log_cfg,
+                        keep_alive=keep_alive,
+                        client_missing=client_missing or None,
+                        gpu_data_available=bool(snap.get("gpu_data_available")),
+                    )
+                    last_advisories.clear()
+                    last_advisories.extend(advisor_findings)
+                    active = list(active) + evaluate_advisor_alarms(advisor_findings)
+                except Exception:
+                    advisor_findings = []
+                    last_advisories.clear()
 
             doctor_alarms: list[dict[str, Any]] = []
             if reachable and srv.local_gpu and sys.platform == "win32":
@@ -451,6 +504,23 @@ def run_gui(
             else:
                 doctor_status.value = ""
                 doctor_status.color = PALETTE["muted"]
+
+            warn_advisories = [f for f in last_advisories if f.severity == "warn"]
+            if warn_advisories:
+                advisor_status.value = (
+                    f"Advisor: {len(warn_advisories)} warning"
+                    f"{'s' if len(warn_advisories) != 1 else ''} — run ollama-sentinel advise"
+                )
+                advisor_status.color = PALETTE["warn"]
+            elif last_advisories:
+                advisor_status.value = (
+                    f"Advisor: {len(last_advisories)} note"
+                    f"{'s' if len(last_advisories) != 1 else ''}"
+                )
+                advisor_status.color = PALETTE["muted"]
+            else:
+                advisor_status.value = ""
+                advisor_status.color = PALETTE["muted"]
 
             icon = tray_icon.get("icon")
             if icon is not None:
@@ -532,12 +602,21 @@ def run_gui(
             library_host.controls.clear()
             if reachable:
                 inv = build_inventory(snap)
+                if show_by_model:
+                    inv = enrich_inventory_rows(inv, show_by_model)
+                advisories_by_model = {
+                    r["name"]: advisories_for_model(last_advisories, r["name"]) for r in inv
+                }
                 free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
                 summary = inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)
                 library_host.controls.append(
                     section_card(
                         "Library",
-                        library_table(inv, on_unload=request_unload),
+                        library_table(
+                            inv,
+                            on_unload=request_unload,
+                            advisories_by_model=advisories_by_model if cfg.advisor else None,
+                        ),
                         subtitle=summary,
                     )
                 )
@@ -703,6 +782,7 @@ def run_gui(
                 proc_vram_host,
                 gaming_status,
                 doctor_status,
+                advisor_status,
                 unload_status,
                 poll_footer,
                 action_row,

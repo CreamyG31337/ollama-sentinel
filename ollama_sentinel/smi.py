@@ -1,7 +1,8 @@
-"""Parse nvidia-smi CSV output."""
+"""Parse nvidia-smi and rocm-smi GPU memory output."""
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from typing import Any
@@ -63,7 +64,75 @@ def parse_nvidia_smi_csv(text: str) -> list[dict[str, Any]]:
     return gpus
 
 
+_ROCM_TOTAL = re.compile(r"Total Memory \(B\):\s*(\d+)", re.I)
+_ROCM_USED = re.compile(r"Total Used Memory \(B\):\s*(\d+)", re.I)
+
+
+def parse_rocm_smi_vram(text: str) -> list[dict[str, Any]]:
+    """Parse `rocm-smi --showmeminfo vram` text output."""
+    gpu_line = re.compile(r"GPU\[(\d+)\]", re.I)
+    partial: dict[int, dict[str, Any]] = {}
+    for line in text.splitlines():
+        header = gpu_line.search(line)
+        if not header:
+            continue
+        idx = int(header.group(1))
+        entry = partial.setdefault(
+            idx,
+            {
+                "index": idx,
+                "name": "AMD GPU",
+                "temperature": None,
+                "fan_speed": None,
+                "utilization": None,
+                "memory_utilization": None,
+                "clock_sm": None,
+                "clock_mem": None,
+                "pstate": None,
+                "memory_used": 0,
+                "memory_total": 0,
+                "memory_reserved": None,
+                "power_draw": None,
+                "power_limit": None,
+                "power_limit_enforced": None,
+                "throttle_hw_thermal": None,
+                "throttle_sw_power_cap": None,
+            },
+        )
+        total_m = _ROCM_TOTAL.search(line)
+        if total_m:
+            entry["memory_total"] = int(total_m.group(1))
+        used_m = _ROCM_USED.search(line)
+        if used_m:
+            entry["memory_used"] = int(used_m.group(1))
+    gpus = [partial[i] for i in sorted(partial)]
+    return [enrich_gpu(g) for g in gpus if g.get("memory_total")]
+
+
+def query_rocm_gpus(gpu_filter: int | None = None) -> list[dict[str, Any]] | None:
+    cmd = ["rocm-smi", "--showmeminfo", "vram"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15, **_no_window()
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    gpus = parse_rocm_smi_vram(result.stdout)
+    if gpu_filter is not None:
+        gpus = [g for g in gpus if g["index"] == gpu_filter]
+    return gpus if gpus else None
+
+
 def query_gpus(gpu_filter: int | None = None) -> list[dict[str, Any]] | None:
+    gpus = query_nvidia_gpus(gpu_filter)
+    if gpus:
+        return gpus
+    return query_rocm_gpus(gpu_filter)
+
+
+def query_nvidia_gpus(gpu_filter: int | None = None) -> list[dict[str, Any]] | None:
     cmd = [
         "nvidia-smi",
         f"--query-gpu={GPU_QUERY}",

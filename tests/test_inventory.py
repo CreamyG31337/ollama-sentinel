@@ -96,6 +96,18 @@ class TestInventory(unittest.TestCase):
     def test_detail_line_missing_metadata(self):
         self.assertEqual(inventory_detail_line({"name": "bare"}), "—")
 
+    def test_fit_unknown_without_gpu(self):
+        snap = {
+            "tags": [{"name": "m", "size": 8e9}],
+            "models": [],
+            "gpus": None,
+            "gpu_data_available": False,
+        }
+        rows = build_inventory(snap)
+        self.assertIsNone(rows[0]["would_spill"])
+        s = inventory_summary(rows)
+        self.assertIn("fit unknown", s)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 
 import unittest
 
-from ollama_sentinel.smi import parse_nvidia_smi_csv
+from ollama_sentinel.smi import parse_nvidia_smi_csv, parse_rocm_smi_vram
 
 LIVE_SAMPLE = (
     "NVIDIA GeForce RTX 3090, 33, 50 %, 1 %, 25 %, 210 MHz, 810 MHz, P5, "
@@ -58,6 +58,19 @@ class TestSmi(unittest.TestCase):
         self.assertEqual(len(gpus), 2)
         self.assertEqual(gpus[0]["index"], 0)
         self.assertEqual(gpus[1]["index"], 1)
+
+    def test_rocm_vram_parse(self):
+        sample = """
+GPU[0]          : VRAM Total Memory (B): 17163091968
+GPU[0]          : VRAM Total Used Memory (B): 15032385536
+GPU[1]          : VRAM Total Memory (B): 8589934592
+GPU[1]          : VRAM Total Used Memory (B): 1073741824
+"""
+        gpus = parse_rocm_smi_vram(sample)
+        self.assertEqual(len(gpus), 2)
+        self.assertEqual(gpus[0]["memory_total"], 17163091968)
+        self.assertEqual(gpus[0]["memory_used"], 15032385536)
+        self.assertEqual(gpus[0]["name"], "AMD GPU")
 
 
 if __name__ == "__main__":

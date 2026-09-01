@@ -7,49 +7,49 @@ todos:
     status: completed
   - id: research-mtp-matrix
     content: Build MTP platform/family truth table with lessons learned (CUDA vs MLX, Qwen vs Gemma)
-    status: pending
+    status: completed
   - id: research-hf-mapping
     content: Define tag-to-HF mapping rules and HF metadata limits for MTP/quant detection
-    status: pending
+    status: completed
   - id: research-kv-estimator
     content: Evaluate KV VRAM estimator feasibility vs measured 3090 loads
     status: completed
   - id: research-rocm-degraded
-    content: "Decide degraded mode for ts-ubuntu-server (RX 6800, ollama:rocm in Docker) - no nvidia-smi exists there"
-    status: pending
+    content: Decide degraded mode for ts-ubuntu-server (RX 6800, ollama:rocm in Docker) - no nvidia-smi exists there
+    status: completed
   - id: research-usable-ctx
-    content: "Verify whether 0.33.2 still truncates prompts to num_ctx/2 (true on 0.32.6) via server.log task.n_tokens"
-    status: pending
+    content: Verify whether 0.33.2 still truncates prompts to num_ctx/2 (true on 0.32.6) via server.log task.n_tokens
+    status: completed
   - id: research-laptop
-    content: "Inspect ts-msi-laptop (RTX 3080 Laptop 16 GB + 68 GB RAM, iGPU) - the one unmodelled hardware class"
+    content: Inspect ts-msi-laptop (RTX 3080 Laptop 16 GB + 68 GB RAM, iGPU) - the one unmodelled hardware class
     status: completed
   - id: laptop-clean-install
     content: "Future experiment: clean Ollama install on ts-msi-laptop (16 GB dGPU + 63.8 GB RAM) to test RAM-aware spill severity and iGPU fallback"
-    status: pending
+    status: cancelled
   - id: narrow-phase-1
     content: "After research, narrow to Phase 1-2: show cache + Library advisories (MTP dormant, quant/VRAM fit)"
-    status: pending
+    status: completed
   - id: design-advisor-finding
     content: Spec AdvisorFinding schema (confidence, evidence, suggestions) parallel to DoctorFinding
-    status: pending
+    status: completed
   - id: fix-render-remote-attribution
     content: "BUG: render.py:128 attributes local process/activity rows to remote servers in multi-host output"
-    status: pending
+    status: completed
   - id: fix-fit-unknown
     content: "BUG: hosts with no GPU data report '0 would spill' instead of 'fit unknown' (inventory_summary)"
-    status: pending
+    status: completed
   - id: test-multi-server
     content: "Multi-server regression tests: multi-entry servers.json, selected_servers, remote snapshots free of local proc rows"
-    status: pending
+    status: completed
   - id: advisor-client-model-missing
-    content: "config:client_model_missing - cross-check a client's configured model names against installed inventory (caught a 9-day live outage)"
-    status: pending
+    content: config:client_model_missing - cross-check a client's configured model names against installed inventory (caught a 9-day live outage)
+    status: completed
   - id: smi-rocm
-    content: "Teach smi.py to read rocm-smi --showmeminfo vram so the RX 6800 host gets fit advisories"
-    status: pending
+    content: Teach smi.py to read rocm-smi --showmeminfo vram so the RX 6800 host gets fit advisories
+    status: completed
   - id: server-optional-flag
     content: "servers.json 'optional: true' - unreachable is normal for the gaming desktop; never alarm, never affect --once exit codes"
-    status: pending
+    status: completed
 isProject: false
 ---
 

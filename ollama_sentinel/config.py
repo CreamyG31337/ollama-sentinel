@@ -21,6 +21,7 @@ class ServerConfig:
     name: str
     url: str
     local_gpu: bool = False
+    optional: bool = False
 
 
 @dataclass
@@ -47,6 +48,9 @@ class AppConfig:
     metrics_history_sec: float = 3600.0
     metrics_max_samples: int = 720
     metrics_log: Path | None = None
+    advisor: bool = True
+    show_cache_ttl: float = 900.0
+    client_config: Path | None = None
 
 
 def parse_dotenv(path: Path) -> dict[str, str]:
@@ -115,6 +119,8 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
     observe_raw = env.get("GAMING_YIELD_OBSERVE", "1")
     metrics_raw = env.get("METRICS", "1")
     metrics_log_raw = env.get("METRICS_LOG", "").strip()
+    advisor_raw = env.get("ADVISOR", "1")
+    client_cfg_raw = env.get("CLIENT_CONFIG", "").strip()
     return AppConfig(
         ollama_url=env.get("OLLAMA_URL", DEFAULT_URL),
         poll_interval=float(env.get("POLL_INTERVAL", 5)),
@@ -135,6 +141,9 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         metrics_history_sec=float(env.get("METRICS_HISTORY_SEC", 3600)),
         metrics_max_samples=int(env.get("METRICS_MAX_SAMPLES", 720)),
         metrics_log=Path(metrics_log_raw) if metrics_log_raw else None,
+        advisor=advisor_raw not in ("0", "false", "False", "no"),
+        show_cache_ttl=float(env.get("SHOW_CACHE_TTL", 900)),
+        client_config=Path(client_cfg_raw) if client_cfg_raw else None,
     )
 
 
@@ -148,6 +157,7 @@ def load_servers(path: Path | None, fallback_url: str) -> list[ServerConfig]:
                     name=entry["name"],
                     url=entry["url"],
                     local_gpu=bool(entry.get("local_gpu", False)),
+                    optional=bool(entry.get("optional", False)),
                 )
             )
         if servers:
@@ -201,6 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doc.add_argument("--server", default="local", help="Target server name")
     doc.add_argument("-y", "--yes", action="store_true", help="Skip --fix-orphans confirm")
+    adv = sub.add_parser("advise", help="Model optimization advisories (heuristic)")
+    adv.add_argument("--json", action="store_true", help="JSON output")
+    adv.add_argument("--server", help="Pin to one server name")
+    adv.add_argument("--client-config", type=Path, help="JSON file listing client model expectations")
     return p
 
 
@@ -219,6 +233,8 @@ def resolve_config(args: argparse.Namespace) -> AppConfig:
         cfg.server = args.server
     servers_path = args.servers_file or Path.cwd() / "servers.json"
     cfg.servers = load_servers(servers_path, cfg.ollama_url)
+    if getattr(args, "client_config", None):
+        cfg.client_config = args.client_config
     return cfg
 
 

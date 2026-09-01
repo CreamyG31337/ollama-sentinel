@@ -76,6 +76,8 @@ def _format_process_vram(process_vram: dict[str, Any] | None, *, interval: float
 def _format_activity(snap: dict[str, Any], proc_rows: list[dict[str, Any]] | None) -> list[str]:
     activity = snap.get("activity")
     if activity is None:
+        if not snap.get("local_gpu", True):
+            return []
         import sys
 
         if sys.platform == "win32":
@@ -105,6 +107,7 @@ def render_snapshot_plain(
     poll_interval: float = 5.0,
     process_vram: dict[str, Any] | None = None,
     proc_vram_interval: float = 30.0,
+    once: bool = False,
 ) -> str:
     lines: list[str] = []
     now = time.time()
@@ -114,19 +117,28 @@ def render_snapshot_plain(
         header = f"[{name}]"
         if polled_ts is not None:
             age = format_poll_age(polled_ts, now)
-            if snap.get("stale") or is_stale(polled_ts, poll_interval, now):
+            stale = snap.get("stale") or (
+                not once and is_stale(polled_ts, poll_interval, now)
+            )
+            if stale:
                 header += f" STALE {age}"
             else:
                 header += f" {age}"
         if not snap.get("reachable"):
-            lines.append(f"{header} Ollama unreachable: {snap.get('error')}")
+            if snap.get("optional"):
+                lines.append(f"{header} Ollama offline (optional host): {snap.get('error')}")
+            else:
+                lines.append(f"{header} Ollama unreachable: {snap.get('error')}")
             continue
         lines.append(f"{header} Ollama {snap.get('version', '?')}")
         inv = build_inventory(snap)
         free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
         lines.append(f"  Library: {inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)}")
-        proc_rows = (process_vram or {}).get("rows") if process_vram else None
-        lines.extend(_format_activity(snap, proc_rows))
+        if snap.get("local_gpu", True):
+            proc_rows = (process_vram or {}).get("rows") if process_vram else None
+            lines.extend(_format_activity(snap, proc_rows))
+        elif snap.get("activity"):
+            lines.extend(_format_activity(snap, None))
         for m in snap.get("models") or []:
             mn = m.get("name") or "?"
             size = m.get("size") or 0
@@ -140,9 +152,10 @@ def render_snapshot_plain(
             )
         for gpu in snap.get("gpus") or []:
             lines.append(f"  GPU {format_gpu_line(gpu)}")
-        lines.extend(
-            _format_process_vram(process_vram, interval=proc_vram_interval)
-        )
+        if snap.get("local_gpu", True):
+            lines.extend(
+                _format_process_vram(process_vram, interval=proc_vram_interval)
+            )
     if alarms:
         lines.append("ALARMS:")
         for a in alarms:
@@ -173,6 +186,8 @@ def render_list_table(snapshots: list[dict[str, Any]]) -> Table:
                 fit = "would spill"
             elif row.get("would_spill") is False:
                 fit = "fits"
+            elif row.get("would_spill") is None:
+                fit = "fit unknown"
             split = ""
             if row.get("loaded"):
                 split = f"{row.get('gpu_pct')}% GPU"
@@ -211,7 +226,10 @@ def build_live_panel(
             else:
                 age_suffix = f" · {age}"
         if not snap.get("reachable"):
-            table.add_row(srv, f"[red]unreachable[/red] {snap.get('error')}{age_suffix}")
+            if snap.get("optional"):
+                table.add_row(srv, f"[dim]offline (optional host)[/dim] {snap.get('error')}{age_suffix}")
+            else:
+                table.add_row(srv, f"[red]unreachable[/red] {snap.get('error')}{age_suffix}")
             continue
         inv = build_inventory(snap)
         free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
@@ -219,9 +237,13 @@ def build_live_panel(
             srv,
             f"v{snap.get('version')} · {inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)}{age_suffix}",
         )
-        proc_rows = (process_vram or {}).get("rows") if process_vram else None
-        for act_line in _format_activity(snap, proc_rows):
-            table.add_row("  activity", act_line.strip())
+        if snap.get("local_gpu", True):
+            proc_rows = (process_vram or {}).get("rows") if process_vram else None
+            for act_line in _format_activity(snap, proc_rows):
+                table.add_row("  activity", act_line.strip())
+        elif snap.get("activity"):
+            for act_line in _format_activity(snap, None):
+                table.add_row("  activity", act_line.strip())
         for m in snap.get("models") or []:
             mn = m.get("name") or "?"
             size = m.get("size") or 0
@@ -236,11 +258,12 @@ def build_live_panel(
             )
         for gpu in snap.get("gpus") or []:
             table.add_row("  gpu", format_gpu_line(gpu))
-    for line in _format_process_vram(process_vram, interval=proc_vram_interval):
-        if line.startswith("  Process VRAM"):
-            table.add_row("proc vram", line.strip())
-        else:
-            table.add_row("  proc", line.strip())
+    if any(s.get("local_gpu", True) for s in snapshots):
+        for line in _format_process_vram(process_vram, interval=proc_vram_interval):
+            if line.startswith("  Process VRAM"):
+                table.add_row("proc vram", line.strip())
+            else:
+                table.add_row("  proc", line.strip())
     alarm_str = _alarm_text(alarms)
     table.add_row("alarms", alarm_str)
     return table

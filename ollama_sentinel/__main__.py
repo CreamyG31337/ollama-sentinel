@@ -32,6 +32,18 @@ from ollama_sentinel.doctor import (
 )
 from ollama_sentinel.doctor_win import kill_orphan_pids
 from ollama_sentinel.unload import unload_model, unload_models
+from ollama_sentinel.advisor import (
+    AdvisorFinding,
+    advisor_log_context,
+    evaluate_advisories,
+    evaluate_advisor_alarms,
+)
+from ollama_sentinel.client_config import (
+    installed_model_names,
+    load_client_config,
+    missing_client_models,
+)
+from ollama_sentinel.show import ShowCache
 
 
 def _attach_activity(
@@ -41,14 +53,12 @@ def _attach_activity(
 ) -> list[dict[str, Any]]:
     if sys.platform != "win32":
         return snapshots
-    servers = {s.name: s for s in selected_servers(cfg)}
     out: list[dict[str, Any]] = []
     for snap in snapshots:
         if not snap.get("reachable"):
             out.append(snap)
             continue
-        srv = servers.get(snap.get("server"))
-        if srv is not None and not srv.local_gpu:
+        if not snap.get("local_gpu", True):
             out.append(snap)
             continue
         enriched = dict(snap)
@@ -190,14 +200,64 @@ def _process_vram_payload(
 def _poll(cfg) -> list[dict[str, Any]]:
     servers = selected_servers(cfg)
     return poll_all(
-        [{"name": s.name, "url": s.url, "local_gpu": s.local_gpu} for s in servers],
+        [
+            {
+                "name": s.name,
+                "url": s.url,
+                "local_gpu": s.local_gpu,
+                "optional": s.optional,
+            }
+            for s in servers
+        ],
         gpu_filter=cfg.gpu_filter,
         query_gpus_fn=query_gpus,
     )
 
 
+def _doctor_log_cfg() -> tuple[dict[str, str], str | None]:
+    return advisor_log_context()
+
+
+def _gather_advisories(
+    cfg,
+    snapshots: list[dict[str, Any]],
+    *,
+    show_cache: ShowCache | None = None,
+) -> list[AdvisorFinding]:
+    if not cfg.advisor:
+        return []
+    cache = show_cache or ShowCache(ttl=cfg.show_cache_ttl)
+    clients = load_client_config(cfg.client_config)
+    installed = installed_model_names(snapshots)
+    client_missing = missing_client_models(clients, installed)
+    log_cfg, keep_alive = _doctor_log_cfg()
+
+    findings: list[AdvisorFinding] = []
+    for i, snap in enumerate(snapshots):
+        show_by_model: dict[str, dict[str, Any]] = {}
+        if snap.get("reachable"):
+            names = [
+                t.get("name") or t.get("model")
+                for t in snap.get("tags") or []
+                if t.get("name") or t.get("model")
+            ]
+            show_by_model = cache.fetch_all(snap["url"], names)
+        findings.extend(
+            evaluate_advisories(
+                snap,
+                show_by_model=show_by_model,
+                log_cfg=log_cfg,
+                keep_alive=keep_alive,
+                client_missing=client_missing if i == 0 else None,
+                gpu_data_available=bool(snap.get("gpu_data_available")),
+            )
+        )
+    return findings
+
+
 def _exit_code(snapshots: list[dict[str, Any]], alarms: list[dict[str, Any]]) -> int:
-    if snapshots and all(not s.get("reachable") for s in snapshots):
+    required = [s for s in snapshots if not s.get("optional")]
+    if required and all(not s.get("reachable") for s in required):
         return 2
     if alarms:
         return 1
@@ -391,6 +451,30 @@ def cmd_doctor(args, cfg) -> int:
     return exit_code
 
 
+def cmd_advise(args, cfg) -> int:
+    if getattr(args, "client_config", None):
+        cfg.client_config = args.client_config
+    snapshots = _poll(cfg)
+    findings = _gather_advisories(cfg, snapshots)
+    if args.json:
+        print(json.dumps({"findings": [f.to_dict() for f in findings]}, indent=2))
+        return 0
+    if not findings:
+        print("No advisories")
+        return 0
+    for f in findings:
+        label = f.severity.upper()
+        conf = f.confidence
+        print(f"{label:7} [{conf}] {f.id}")
+        print(f"        {f.message}")
+        if f.remedy:
+            print(f"        remedy: {f.remedy}")
+        if f.suggestions:
+            for s in f.suggestions:
+                print(f"        try: {s}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -422,6 +506,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return cmd_doctor(args, cfg)
 
+    if args.command == "advise":
+        return cmd_advise(args, cfg)
+
     state_path = cfg.state_file or Path("state.json")
     state = load_state(state_path)
     once_mode = args.once or args.json or args.list
@@ -439,9 +526,11 @@ def main(argv: list[str] | None = None) -> int:
         findings = _doctor_findings_for_snapshots(
             snapshots, cfg, proc_rows=_doctor_proc_rows()
         )
+        advisor_findings = _gather_advisories(cfg, snapshots)
         active, new_state, transitions = _evaluate_all(
             snapshots, state, cfg.thresholds, doctor_findings=findings
         )
+        active = list(active) + evaluate_advisor_alarms(advisor_findings)
         return snapshots, active, new_state, transitions
 
     if args.once or args.json or args.list:

@@ -99,5 +99,8 @@ def poll_all(
             query_gpus_fn=lambda gf: local_gpu_data,
             polled_at=polled_at,
         )
+        snap["local_gpu"] = bool(srv.get("local_gpu"))
+        snap["optional"] = bool(srv.get("optional"))
+        snap["gpu_data_available"] = snap.get("gpus") is not None
         results.append(snap)
     return results

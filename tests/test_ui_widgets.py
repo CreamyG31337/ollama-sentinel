@@ -2,7 +2,7 @@
 
 import unittest
 
-from ollama_sentinel.ui_widgets import alarm_state, fit_label
+from ollama_sentinel.ui_widgets import advisory_summary, alarm_state, fit_label
 
 
 class TestFitLabel(unittest.TestCase):
@@ -24,6 +24,30 @@ class TestFitLabel(unittest.TestCase):
         text, color = fit_label({"loaded": False})
         self.assertEqual(text, "—")
         self.assertIsNone(color)
+
+    def test_fit_unknown(self) -> None:
+        text, color = fit_label({"loaded": False, "would_spill": None})
+        self.assertEqual(text, "fit unknown")
+        self.assertIsNotNone(color)
+
+
+class TestAdvisorySummary(unittest.TestCase):
+    def test_empty(self) -> None:
+        self.assertEqual(advisory_summary([]), "—")
+
+    def test_warn_token(self) -> None:
+        from ollama_sentinel.advisor import AdvisorFinding
+
+        findings = [
+            AdvisorFinding(
+                category="fit",
+                severity="warn",
+                confidence="medium",
+                id="fit:would_spill:big",
+                message="tight",
+            )
+        ]
+        self.assertIn("big", advisory_summary(findings))
 
 
 class TestAlarmState(unittest.TestCase):
