@@ -134,9 +134,18 @@ def section_card(
     )
 
 
-def alarm_banner(reachable: bool, active: list[dict[str, Any]], *, error: str | None = None) -> ft.Container:
+def alarm_banner(
+    reachable: bool,
+    active: list[dict[str, Any]],
+    *,
+    error: str | None = None,
+    optional: bool = False,
+) -> ft.Container:
     if not reachable:
-        title, body, key = "Unreachable", error or "Ollama not reachable", "alarm"
+        if optional:
+            title, body, key = "Offline (optional host)", error or "Ollama not reachable", "warn"
+        else:
+            title, body, key = "Unreachable", error or "Ollama not reachable", "alarm"
     else:
         title, body, key = alarm_state(reachable, active)
     bg = {

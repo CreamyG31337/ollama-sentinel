@@ -24,6 +24,9 @@ SEARCH_SORTS: tuple[tuple[str, str], ...] = (
 )
 
 
+from ollama_sentinel.net_errors import HubRequestError, format_network_error
+
+
 def _hub_get(path: str, params: dict[str, str] | None = None, token: str | None = None) -> Any:
     url = HUB_BASE + path
     if params:
@@ -32,8 +35,11 @@ def _hub_get(path: str, params: dict[str, str] | None = None, token: str | None 
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise HubRequestError(format_network_error(exc, context="Hugging Face"), cause=exc) from exc
 
 
 def tag_value(tags: list[str], prefix: str) -> str | None:

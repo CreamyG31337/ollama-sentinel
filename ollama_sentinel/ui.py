@@ -29,6 +29,7 @@ from ollama_sentinel.advisor import (
 )
 from ollama_sentinel.inventory import build_inventory, enrich_inventory_rows, inventory_summary
 from ollama_sentinel.poll import poll_all
+from ollama_sentinel.net_errors import format_network_error
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.proc_vram import ProcessVramCollector
 from ollama_sentinel.restart import spawn_restart
@@ -36,7 +37,7 @@ from ollama_sentinel.unload import unload_models
 from ollama_sentinel.show import ShowCache
 from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
-from ollama_sentinel.telemetry import format_poll_age, is_stale
+from ollama_sentinel.telemetry import format_poll_age, is_stale, polled_at_iso
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
 from ollama_sentinel.ui_charts import charts_subtitle, metrics_charts_panel
@@ -139,13 +140,14 @@ def run_gui(
                 gaming_watcher.stop()
             if proc_collector:
                 proc_collector.stop()
-            release_lock()
-            spawn_restart()
             icon = tray_icon.get("icon")
             if icon is not None:
                 icon.stop()
-            page.window.prevent_close = False
-            page.window.destroy()
+            page.window.visible = False
+            page.window.skip_task_bar = True
+            page.update()
+            release_lock()
+            spawn_restart()
 
         def request_restart_app() -> None:
             page.run_task(restart_app_async)
@@ -257,6 +259,8 @@ def run_gui(
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
         discover_state: dict[str, Any] = {
             "sort": "trendingScore",
+            "search_gen": 0,
+            "search_error": None,
             "expanded_id": None,
             "last_results": [],
             "detail_cache": {},
@@ -418,11 +422,30 @@ def run_gui(
                     "optional": srv.optional,
                 }
             ]
-            snap = poll_all(
-                target,
-                gpu_filter=cfg.gpu_filter,
-                query_gpus_fn=query_gpus,
-            )[0]
+            try:
+                snap = poll_all(
+                    target,
+                    gpu_filter=cfg.gpu_filter,
+                    query_gpus_fn=query_gpus,
+                )[0]
+            except Exception as exc:
+                now = time.time()
+                snap = {
+                    "server": srv.name,
+                    "url": srv.url,
+                    "reachable": False,
+                    "optional": srv.optional,
+                    "local_gpu": srv.local_gpu,
+                    "gpu_data_available": False,
+                    "version": None,
+                    "models": [],
+                    "tags": [],
+                    "gpus": None,
+                    "error": format_network_error(exc, context=srv.name),
+                    "polled_at_ts": now,
+                    "polled_at": polled_at_iso(now),
+                    "stale": False,
+                }
             last_snap.clear()
             last_snap.update(snap)
             reachable = bool(snap.get("reachable"))
@@ -538,11 +561,15 @@ def run_gui(
             poll_state["reachable"] = reachable
             if not reachable:
                 poll_footer.value = (
-                    f"Unreachable · {format_poll_age(polled_ts, now)}"
-                    if polled_ts is not None
-                    else "Unreachable"
+                    f"Offline (optional) · {format_poll_age(polled_ts, now)}"
+                    if snap.get("optional")
+                    else (
+                        f"Unreachable · {format_poll_age(polled_ts, now)}"
+                        if polled_ts is not None
+                        else "Unreachable"
+                    )
                 )
-                poll_footer.color = PALETTE["alarm"]
+                poll_footer.color = PALETTE["warn"] if snap.get("optional") else PALETTE["alarm"]
             else:
                 update_poll_footer(now)
 
@@ -550,6 +577,7 @@ def run_gui(
                 reachable,
                 active,
                 error=snap.get("error"),
+                optional=bool(snap.get("optional")),
             )
 
             gpu_host.controls.clear()
@@ -621,10 +649,23 @@ def run_gui(
                     )
                 )
             else:
+                err = snap.get("error") or "Ollama is not reachable"
+                subtitle = "Optional host — offline is normal" if srv.optional else None
                 library_host.controls.append(
                     section_card(
                         "Library",
-                        ft.Text("Ollama is not running.", size=12, color=PALETTE["muted"]),
+                        ft.Column(
+                            [
+                                ft.Text(err, size=12, color=PALETTE["alarm"] if not srv.optional else PALETTE["warn"]),
+                                ft.Text(
+                                    "Switch servers above or press Refresh when Ollama is back.",
+                                    size=11,
+                                    color=PALETTE["muted"],
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                        subtitle=subtitle,
                     )
                 )
 
@@ -654,7 +695,9 @@ def run_gui(
             def worker() -> None:
                 for ev in pull_model(srv.url, model_name):
                     if "error" in ev:
-                        pull_status.value = ev["error"]
+                        pull_status.value = format_network_error(
+                            RuntimeError(ev["error"]), context="Pull"
+                        )
                         page.update()
                         return
                     pull_status.value = str(ev.get("status") or ev)
@@ -665,8 +708,36 @@ def run_gui(
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def render_discover_results(results: list[dict[str, Any]]) -> None:
+        def render_discover_results() -> None:
             discover_col.controls.clear()
+            search_error = discover_state.get("search_error")
+            if search_error:
+                discover_col.controls.append(
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Text(
+                                    "Search failed",
+                                    size=14,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=PALETTE["alarm"],
+                                ),
+                                ft.Text(search_error, size=12, color=ft.Colors.WHITE70),
+                                ft.Text(
+                                    "Check your connection and press Search to retry.",
+                                    size=11,
+                                    color=PALETTE["muted"],
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                        padding=12,
+                        border_radius=8,
+                        bgcolor=ft.Colors.RED_900,
+                    )
+                )
+                return
+            results = discover_state.get("last_results") or []
             if not results:
                 discover_col.controls.append(
                     ft.Text("No models found.", size=12, color=PALETTE["muted"])
@@ -700,13 +771,13 @@ def run_gui(
 
         def load_detail_if_needed(model_id: str) -> None:
             if model_id in discover_state["detail_cache"]:
-                render_discover_results(discover_state.get("last_results") or [])
+                render_discover_results()
                 page.update()
                 return
             if model_id in discover_state["detail_loading"]:
                 return
             discover_state["detail_loading"].add(model_id)
-            render_discover_results(discover_state.get("last_results") or [])
+            render_discover_results()
             page.update()
 
             def worker() -> None:
@@ -717,18 +788,23 @@ def run_gui(
                     )
                     discover_state["detail_errors"].pop(model_id, None)
                 except Exception as exc:
-                    discover_state["detail_errors"][model_id] = str(exc)
+                    discover_state["detail_errors"][model_id] = format_network_error(
+                        exc, context="Model details"
+                    )
                 finally:
                     discover_state["detail_loading"].discard(model_id)
-                render_discover_results(discover_state.get("last_results") or [])
+                render_discover_results()
                 page.update()
 
             threading.Thread(target=worker, daemon=True).start()
 
-        def do_search(_=None) -> None:
+        def do_search(_=None, *, sort_override: str | None = None) -> None:
             query = search_field.value or ""
-            sort = discover_sort.value or discover_state["sort"]
+            sort = sort_override or discover_sort.value or discover_state["sort"]
             discover_state["sort"] = sort
+            discover_state["search_gen"] = discover_state.get("search_gen", 0) + 1
+            gen = discover_state["search_gen"]
+            discover_state["search_error"] = None
             pull_status.value = "Searching…"
             page.update()
 
@@ -743,18 +819,24 @@ def run_gui(
                         )
                     else:
                         results = search_models("", sort=sort, limit=20, token=cfg.hf_token)
+                    if discover_state.get("search_gen") != gen:
+                        return
                     discover_state["last_results"] = results
+                    discover_state["search_error"] = None
                     pull_status.value = f"{len(results)} result{'s' if len(results) != 1 else ''}"
                 except Exception as exc:
+                    if discover_state.get("search_gen") != gen:
+                        return
                     discover_state["last_results"] = []
-                    pull_status.value = str(exc)
-                render_discover_results(discover_state.get("last_results") or [])
+                    discover_state["search_error"] = format_network_error(exc, context="Discover")
+                    pull_status.value = "Search failed"
+                render_discover_results()
                 page.update()
 
             threading.Thread(target=worker, daemon=True).start()
 
         def on_discover_sort_change(e) -> None:
-            do_search()
+            do_search(sort_override=e.control.value)
 
         discover_sort.on_change = on_discover_sort_change
         search_field.on_submit = do_search
@@ -847,6 +929,11 @@ def run_gui(
             expand=True,
             padding=ft.Padding(left=8),
         )
+
+        def on_server_change(_e) -> None:
+            refresh()
+
+        current_server.on_change = on_server_change
 
         def on_nav(e):
             idx = int(e.control.selected_index)

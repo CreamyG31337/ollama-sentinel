@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from ollama_sentinel.net_errors import format_network_error
 from ollama_sentinel.telemetry import polled_at_iso
 
 
@@ -21,11 +22,11 @@ def _get_json(url: str, path: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[An
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode()), None
     except urllib.error.HTTPError as exc:
-        return None, f"HTTP {exc.code}"
+        return None, format_network_error(exc)
     except urllib.error.URLError as exc:
-        return None, str(exc.reason)
+        return None, format_network_error(exc)
     except (TimeoutError, json.JSONDecodeError, OSError) as exc:
-        return None, str(exc)
+        return None, format_network_error(exc)
 
 
 def poll_server(
