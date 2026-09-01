@@ -1,0 +1,15 @@
+[cr-desktop-3090] STALE 23:05:20 (60s ago) Ollama 0.33.2
+  Library: 6 installed | 0 loaded | free VRAM: 22.4 GB (87%)
+  Last activity: Idle
+  GPU #0 · used 3.4 GB · free 22.4 GB (87%) · total 25.8 GB · reserved 0.3 GB · temp 30°C · fan 50% · util 7% · mem util 30% · clocks 210 MHz/810 MHz · P5 · power 37.4 W/366.0 W
+  Process VRAM as of 23:06:20 (0s ago)
+  2888 dwm.exe: 0.63 GB local, 0.00 GB non-local, 0% util
+  41736 Cursor.exe: 0.30 GB local, 0.01 GB non-local, 0% util
+  67332 brave.exe: 0.25 GB local, 0.03 GB non-local, 0% util
+[ubuntu-rx6800] STALE 23:05:20 (60s ago) Ollama 0.33.2
+  Library: 20 installed | 2 loaded | fit unknown
+  granite4.1:8b: ctx 24,576 · unknown · granite · 8.79B · 13.1 GB total, 13.1 GB VRAM, 0% CPU / 100% GPU, expires in 3h 58m (03:04:57)
+  bge-m3:latest: ctx 8,192 · F16 · bert · 566.70M · 0.7 GB total, 0.7 GB VRAM, 0% CPU / 100% GPU, expires in 3h 16m (02:23:03)
+[ts-desktop-3070] STALE 23:05:20 (60s ago) Ollama unreachable: [WinError 10061] No connection could be made because the target machine actively refused it
+[msi-laptop-3080l] STALE 23:05:20 (60s ago) Ollama unreachable: timed out
+Alarms: OK
