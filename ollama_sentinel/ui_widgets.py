@@ -237,7 +237,7 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
             )
         )
 
-    return section_card("Activity", ft.Column(lines, spacing=4))
+    return section_card("Last activity", ft.Column(lines, spacing=4))
 
 
 def process_vram_table(

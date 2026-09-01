@@ -84,7 +84,7 @@ def _format_activity(snap: dict[str, Any], proc_rows: list[dict[str, Any]] | Non
             activity = build_server_activity(proc_rows=proc_rows).to_dict()
         else:
             return []
-    lines = [f"  Activity: {activity.get('summary', '—')}"]
+    lines = [f"  Last activity: {activity.get('summary', '—')}"]
     for r in activity.get("runners") or []:
         util = r.get("engine_3d_pct") or 0
         tag = "busy" if r.get("busy") else "idle"
@@ -240,10 +240,10 @@ def build_live_panel(
         if snap.get("local_gpu", True):
             proc_rows = (process_vram or {}).get("rows") if process_vram else None
             for act_line in _format_activity(snap, proc_rows):
-                table.add_row("  activity", act_line.strip())
+                table.add_row("  last activity", act_line.strip())
         elif snap.get("activity"):
             for act_line in _format_activity(snap, None):
-                table.add_row("  activity", act_line.strip())
+                table.add_row("  last activity", act_line.strip())
         for m in snap.get("models") or []:
             mn = m.get("name") or "?"
             size = m.get("size") or 0
