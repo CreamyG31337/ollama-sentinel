@@ -9,6 +9,7 @@ import flet as ft
 from ollama_sentinel.alarms import format_expires, gpu_pct
 from ollama_sentinel.activity import ServerActivity, model_detail_line
 from ollama_sentinel.catalog import format_count, summarize_list_item
+from ollama_sentinel.inventory import inventory_detail_line
 from ollama_sentinel.telemetry import format_bytes_gb, format_field, format_throttle
 
 PALETTE = {
@@ -338,6 +339,7 @@ def library_table(
         state_color = PALETTE["ok"] if row.get("loaded") else PALETTE["muted"]
         cells = [
             _cell(row["name"]),
+            _cell(inventory_detail_line(row)),
             _cell(f"{row['size_gb']:.1f} GB"),
             _cell(state, color=state_color),
             _cell(fit_text, color=fit_color),
@@ -357,6 +359,7 @@ def library_table(
         data_rows.append(ft.DataRow(cells=cells))
     columns = [
         ft.DataColumn(ft.Text("Name", size=12, weight=ft.FontWeight.BOLD)),
+        ft.DataColumn(ft.Text("Details", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("Size", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("State", size=12, weight=ft.FontWeight.BOLD)),
         ft.DataColumn(ft.Text("Fit", size=12, weight=ft.FontWeight.BOLD)),

@@ -2,7 +2,7 @@
 
 import unittest
 
-from ollama_sentinel.inventory import build_inventory, inventory_summary
+from ollama_sentinel.inventory import build_inventory, inventory_detail_line, inventory_summary
 
 
 class TestInventory(unittest.TestCase):
@@ -43,6 +43,58 @@ class TestInventory(unittest.TestCase):
         rows = [{"loaded": False, "would_spill": False}]
         s = inventory_summary(rows, free_vram_gb=4.2, free_vram_pct=17.0)
         self.assertIn("free VRAM: 4.2 GB (17%)", s)
+
+    def test_metadata_from_tags(self):
+        snap = {
+            "tags": [
+                {
+                    "name": "qwen3:27b",
+                    "size": 16e9,
+                    "details": {
+                        "quantization_level": "Q4_K_M",
+                        "family": "qwen35",
+                        "parameter_size": "27.3B",
+                    },
+                }
+            ],
+            "models": [],
+            "gpus": [],
+        }
+        rows = build_inventory(snap)
+        self.assertEqual(rows[0]["quantization"], "Q4_K_M")
+        self.assertEqual(rows[0]["family"], "qwen35")
+        self.assertEqual(rows[0]["parameter_size"], "27.3B")
+        self.assertEqual(
+            inventory_detail_line(rows[0]),
+            "Q4_K_M · qwen35 · 27.3B",
+        )
+
+    def test_loaded_context_in_detail_line(self):
+        snap = {
+            "tags": [
+                {
+                    "name": "m",
+                    "size": 8e9,
+                    "details": {"quantization_level": "Q8_0", "family": "llama"},
+                }
+            ],
+            "models": [
+                {
+                    "name": "m",
+                    "size": 8e9,
+                    "size_vram": 8e9,
+                    "context_length": 65536,
+                }
+            ],
+            "gpus": [],
+        }
+        rows = build_inventory(snap)
+        self.assertEqual(rows[0]["context_length"], 65536)
+        self.assertIn("ctx 65,536", inventory_detail_line(rows[0]))
+        self.assertIn("Q8_0", inventory_detail_line(rows[0]))
+
+    def test_detail_line_missing_metadata(self):
+        self.assertEqual(inventory_detail_line({"name": "bare"}), "—")
 
 
 if __name__ == "__main__":

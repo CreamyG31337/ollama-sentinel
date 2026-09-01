@@ -12,7 +12,7 @@ from rich.text import Text
 
 from ollama_sentinel.alarms import format_expires, gpu_pct
 from ollama_sentinel.activity import build_server_activity, model_detail_line
-from ollama_sentinel.inventory import build_inventory, inventory_summary
+from ollama_sentinel.inventory import build_inventory, inventory_detail_line, inventory_summary
 from ollama_sentinel.telemetry import format_gpu_line, format_poll_age, is_stale
 
 
@@ -156,6 +156,7 @@ def render_list_table(snapshots: list[dict[str, Any]]) -> Table:
     table = Table(title="Installed models")
     table.add_column("Server")
     table.add_column("Name")
+    table.add_column("Details")
     table.add_column("Size GB")
     table.add_column("Loaded")
     table.add_column("Fit")
@@ -178,6 +179,7 @@ def render_list_table(snapshots: list[dict[str, Any]]) -> Table:
             table.add_row(
                 srv,
                 row["name"],
+                inventory_detail_line(row),
                 f"{row['size_gb']:.1f}",
                 "yes" if row["loaded"] else "no",
                 fit,

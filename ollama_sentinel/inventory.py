@@ -17,6 +17,24 @@ def free_vram_bytes(gpus: list[dict[str, Any]] | None) -> int | None:
     return max(0, int(total - used))
 
 
+def inventory_detail_line(row: dict[str, Any]) -> str:
+    """Short context/quant summary for a library row."""
+    parts: list[str] = []
+    ctx = row.get("context_length")
+    if ctx:
+        parts.append(f"ctx {ctx:,}")
+    quant = row.get("quantization")
+    if quant:
+        parts.append(str(quant))
+    fam = row.get("family")
+    if fam:
+        parts.append(str(fam))
+    params = row.get("parameter_size")
+    if params:
+        parts.append(str(params))
+    return " · ".join(parts) if parts else "—"
+
+
 def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Join /api/tags with /api/ps and optional free VRAM."""
     loaded_by_name: dict[str, dict[str, Any]] = {}
@@ -32,13 +50,15 @@ def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         name = tag.get("name") or tag.get("model") or "unknown"
         size = tag.get("size") or 0
         loaded = name in loaded_by_name
+        details = tag.get("details") or {}
         row: dict[str, Any] = {
             "name": name,
             "size": size,
             "size_gb": size / 1e9 if size else 0,
             "loaded": loaded,
-            "quantization": (tag.get("details") or {}).get("quantization_level"),
-            "family": (tag.get("details") or {}).get("family"),
+            "quantization": details.get("quantization_level"),
+            "family": details.get("family"),
+            "parameter_size": details.get("parameter_size"),
             "modified_at": tag.get("modified_at"),
             "digest": tag.get("digest"),
         }
@@ -49,6 +69,9 @@ def build_inventory(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             row["size_vram"] = sv
             row["gpu_pct"] = gpu_pct(ls, sv)
             row["would_spill"] = False
+            row["context_length"] = lm.get("context_length") or (lm.get("details") or {}).get(
+                "context_length"
+            )
         elif free is not None and size > free:
             row["would_spill"] = True
         else:
