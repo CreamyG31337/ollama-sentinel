@@ -25,7 +25,20 @@ def load_client_config(path: Path | None) -> list[dict[str, Any]]:
         models = entry.get("models") or []
         if isinstance(models, str):
             models = [models]
-        out.append({"name": str(name), "models": [str(m) for m in models if m]})
+        record: dict[str, Any] = {
+            "name": str(name),
+            "models": [str(m) for m in models if m],
+        }
+        ctx = entry.get("context_length")
+        if ctx is not None:
+            try:
+                record["context_length"] = int(ctx)
+            except (TypeError, ValueError):
+                pass
+        for key in ("context_length_file", "context_length_key", "context_length_match"):
+            if entry.get(key):
+                record[key] = str(entry[key])
+        out.append(record)
     return out
 
 
@@ -85,3 +98,30 @@ def missing_client_models(
             if normalize_tag(str(model)) not in installed:
                 missing.append((cname, model))
     return missing
+
+
+def overcommitted_clients(
+    clients: list[dict[str, Any]],
+    served_context: int | None,
+) -> list[tuple[str, int, str]]:
+    """Clients whose context window exceeds the one Ollama actually serves.
+
+    Ollama advertises a model's *architectural* context (e.g. 262144) but serves
+    whatever ``OLLAMA_CONTEXT_LENGTH`` says (e.g. 65536). A client that
+    auto-detects the former sizes its history — and its compaction threshold — to
+    a window that does not exist, so it fills the real one and every reply is
+    truncated.
+
+    Returns ``(client, window, source)`` where source is ``file`` when read from
+    the client's own config and ``declared`` when taken from a static value.
+    """
+    if not served_context or served_context <= 0:
+        return []
+    from ollama_sentinel.client_probe import resolve_client_context
+
+    out: list[tuple[str, int, str]] = []
+    for client in clients:
+        window, source = resolve_client_context(client)
+        if window is not None and window > served_context:
+            out.append((str(client.get("name") or "client"), window, source))
+    return out

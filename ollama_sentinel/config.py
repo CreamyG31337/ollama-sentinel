@@ -211,6 +211,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doc.add_argument("--server", default="local", help="Target server name")
     doc.add_argument("-y", "--yes", action="store_true", help="Skip --fix-orphans confirm")
+    upd = sub.add_parser("update", help="Report or apply a downloaded Ollama update")
+    upd.add_argument("--apply", action="store_true", help="Install the staged update")
+    upd.add_argument(
+        "--force",
+        action="store_true",
+        help="Apply even when the server is busy (drops in-flight requests, local and remote)",
+    )
+    upd.add_argument("--dry-run", action="store_true", help="Show the installer command only")
+    upd.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=900.0,
+        help="Quiet period required before applying (default 900)",
+    )
+    upd.add_argument("--server", default="local", help="Target server name")
+    upd.add_argument("--json", action="store_true", help="JSON output")
+    upd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
     adv = sub.add_parser("advise", help="Model optimization advisories (heuristic)")
     adv.add_argument("--json", action="store_true", help="JSON output")
     adv.add_argument("--server", help="Pin to one server name")
@@ -221,6 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_config(args: argparse.Namespace) -> AppConfig:
     env = load_env()
     cfg = config_from_env(env)
+    # Stored GUI toggles sit between .env and explicit CLI flags: the user set
+    # them deliberately, but a flag passed for this run still wins.
+    try:
+        from ollama_sentinel.settings import apply_to_config
+
+        apply_to_config(cfg)
+    except Exception:
+        pass
     if args.ollama_url:
         cfg.ollama_url = args.ollama_url
     if args.interval is not None:

@@ -606,3 +606,77 @@ def _discover_detail_controls(
 
     controls.append(ft.TextButton("Open on Hugging Face", icon=ft.Icons.OPEN_IN_NEW, on_click=lambda _: on_open_hf()))
     return controls
+
+
+def settings_panel(
+    on_change: Any,
+    *,
+    current: Any,
+) -> ft.Control:
+    """Render every declared setting as a control, grouped by section.
+
+    Built from the ``SETTINGS`` registry rather than hand-written controls, so
+    adding a feature flag needs one entry and no UI work — and no toggle can
+    quietly go missing from the panel.
+
+    ``current(setting)`` supplies the resolved value (stored, else ``.env``,
+    else default) and ``on_change(key, value)`` persists one change.
+    """
+    from ollama_sentinel.settings import sections
+
+    cards: list[ft.Control] = []
+    for name, group in sections():
+        rows: list[ft.Control] = []
+        for setting in group:
+            value = current(setting)
+            label = ft.Column(
+                [
+                    ft.Text(setting.label, size=13),
+                    ft.Text(setting.help, size=11, color=PALETTE["muted"]),
+                ],
+                spacing=1,
+                expand=True,
+            )
+            if setting.kind == "bool":
+                control: ft.Control = ft.Switch(
+                    value=bool(value),
+                    on_change=_bool_handler(on_change, setting.key),
+                )
+            else:
+                control = ft.TextField(
+                    value=str(value),
+                    width=110,
+                    dense=True,
+                    keyboard_type=ft.KeyboardType.NUMBER,
+                    on_blur=_number_handler(on_change, setting.key),
+                    on_submit=_number_handler(on_change, setting.key),
+                )
+            rows.append(
+                ft.Row(
+                    [label, control],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+        cards.append(section_card(name, ft.Column(rows, spacing=10)))
+    return ft.Column(cards, spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
+
+
+def _bool_handler(on_change: Any, key: str):
+    def handler(e) -> None:
+        on_change(key, bool(e.control.value))
+
+    return handler
+
+
+def _number_handler(on_change: Any, key: str):
+    """Commit on blur/submit rather than per keystroke.
+
+    Saving on every character would persist half-typed values like ``9`` while
+    the user is on their way to ``900``.
+    """
+
+    def handler(e) -> None:
+        on_change(key, e.control.value)
+
+    return handler

@@ -21,3 +21,6 @@ hub-cache.json
 # runtime log written by the scheduled task
 sentinel.jsonl
 *.jsonl
+
+clients.json
+!clients.example.json

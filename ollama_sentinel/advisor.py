@@ -7,6 +7,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ollama_sentinel.ctx_pressure import CtxPressureReport, WARN_FILL
 from ollama_sentinel.hf_mapping import hf_search_query_from_tag
 from ollama_sentinel.inventory import build_inventory, free_vram_bytes
 from ollama_sentinel.mtp_matrix import mtp_platform_note
@@ -74,6 +75,9 @@ def evaluate_advisories(
     log_cfg: dict[str, str] | None = None,
     keep_alive: str | None = None,
     client_missing: list[tuple[str, str]] | None = None,
+    client_overcommitted: list[tuple[str, int, str]] | None = None,
+    ctx: CtxPressureReport | None = None,
+    update_status: Any = None,
     gpu_data_available: bool = True,
 ) -> list[AdvisorFinding]:
     if not snapshot.get("reachable"):
@@ -391,7 +395,159 @@ def evaluate_advisories(
                 )
             )
 
+    findings.extend(_context_pressure_findings(server, ctx, ctx_cfg))
+
+    # Info, not warn: a pending update is a standing state, and an alarm that
+    # cannot clear until someone reboots a service is one people mute.
+    if update_status is not None and getattr(update_status, "pending", False):
+        findings.append(
+            AdvisorFinding(
+                category="config",
+                severity="info",
+                confidence="high",
+                id=f"config:update_pending:{server}",
+                message=f"[{server}] {update_status.summary}",
+                remedy=(
+                    "Restarting ollama does NOT apply it — the staged installer must run: "
+                    "ollama-sentinel update --apply"
+                ),
+                evidence={
+                    "running": getattr(update_status, "running_version", None),
+                    "staged": getattr(update_status, "staged_version", None),
+                },
+            )
+        )
+
+    # Prevention: a client sized to a window this server does not serve
+    served = (ctx.n_ctx_slot if ctx else None) or _as_int(ctx_cfg)
+    # Without a known served window the comparison is unprovable, not passing.
+    if client_overcommitted and served:
+        for cname, declared, source in client_overcommitted:
+            origin = "reads" if source == "file" else "is declared for"
+            findings.append(
+                AdvisorFinding(
+                    category="client",
+                    severity="warn",
+                    confidence="high",
+                    id=f"client:ctx_overcommit:{cname}",
+                    message=(
+                        f"Client {cname} {origin} a {declared:,}-token context "
+                        f"but this server serves {served:,} — replies will truncate"
+                    ),
+                    remedy=(
+                        f"Pin the client's context window to {served:,} so its compaction "
+                        "fires before the server's window fills"
+                    ),
+                    evidence={
+                        "client_window": declared,
+                        "served": served,
+                        "client": cname,
+                        "source": source,
+                    },
+                )
+            )
+
     return findings
+
+
+def _as_int(raw: Any) -> int | None:
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _context_pressure_findings(
+    server: str,
+    ctx: CtxPressureReport | None,
+    ctx_cfg: str | None,
+) -> list[AdvisorFinding]:
+    """Turn observed per-request context pressure into advisories.
+
+    Ordered most-actionable first: an observed truncation is ground truth, a
+    retry ladder explains *why* it kept failing, and low headroom is the
+    leading indicator that catches the next one before it happens.
+    """
+    if ctx is None or not ctx.prompts:
+        return []
+
+    out: list[AdvisorFinding] = []
+    window = ctx.n_ctx_slot or 0
+
+    if ctx.truncated_count:
+        out.append(
+            AdvisorFinding(
+                category="runtime",
+                severity="warn",
+                confidence="high",
+                id=f"runtime:ctx_truncated:{server}",
+                message=(
+                    f"[{server}] {ctx.truncated_count} generation(s) truncated against the "
+                    f"{window:,}-token window — replies were cut off, not merely slow"
+                ),
+                remedy=(
+                    "A client is sending prompts that fill the window. Lower its history "
+                    "or raise OLLAMA_CONTEXT_LENGTH (costs VRAM)"
+                ),
+                evidence={"truncated": ctx.truncated_count, "n_ctx_slot": window},
+            )
+        )
+
+    if ctx.ladder:
+        sizes = ", ".join(f"{p.n_tokens:,}" for p in ctx.ladder)
+        out.append(
+            AdvisorFinding(
+                category="runtime",
+                severity="warn",
+                confidence="high",
+                id=f"runtime:ctx_retry_ladder:{server}",
+                message=(
+                    f"[{server}] a client is retrying into the context ceiling — "
+                    f"{len(ctx.ladder)} consecutive prompts grew {sizes} against {window:,}"
+                ),
+                remedy=(
+                    "The client re-sends the partial reply on truncation, so each retry "
+                    "makes the prompt larger. Fix its context accounting; retries cannot recover"
+                ),
+                evidence={"ladder": [p.n_tokens for p in ctx.ladder], "n_ctx_slot": window},
+            )
+        )
+
+    worst = ctx.worst
+    if worst is not None and worst.fill >= WARN_FILL and not ctx.truncated_count:
+        out.append(
+            AdvisorFinding(
+                category="runtime",
+                severity="warn",
+                confidence="medium",
+                id=f"runtime:ctx_headroom:{server}",
+                message=(
+                    f"[{server}] a prompt filled {worst.fill * 100:.0f}% of the "
+                    f"{window:,}-token window, leaving {worst.headroom:,} tokens to answer in"
+                ),
+                remedy="Reduce the client's history before it truncates",
+                evidence={"n_tokens": worst.n_tokens, "headroom": worst.headroom},
+            )
+        )
+
+    # Only meaningful once something is actually pressing on the window.
+    if ctx.kv_shift_disabled and (ctx.truncated_count or (worst and worst.fill >= WARN_FILL)):
+        out.append(
+            AdvisorFinding(
+                category="config",
+                severity="info",
+                confidence="high",
+                id=f"config:kv_shift_disabled:{server}",
+                message=(
+                    f"[{server}] KV cache shifting is disabled for this context — a full "
+                    "window truncates hard instead of sliding"
+                ),
+                remedy="Expected for some architectures; means headroom must be kept by the client",
+                evidence={"OLLAMA_CONTEXT_LENGTH": ctx_cfg},
+            )
+        )
+
+    return out
 
 
 def advisor_log_context() -> tuple[dict[str, str], str | None]:

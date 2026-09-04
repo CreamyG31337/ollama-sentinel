@@ -42,8 +42,10 @@ from ollama_sentinel.telemetry import format_poll_age, is_stale, polled_at_iso
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
 from ollama_sentinel.ui_charts import charts_subtitle, metrics_charts_panel
+from ollama_sentinel.settings import apply_to_config, effective, load_settings, set_setting
 from ollama_sentinel.ui_widgets import (
     PALETTE,
+    settings_panel,
     activity_card,
     alarm_banner,
     discover_result_tile,
@@ -927,7 +929,40 @@ def run_gui(
             expand=True,
             spacing=8,
         )
-        pages = [status_page, charts_page, library_page, discover_page]
+        settings_status = ft.Text("", size=12, color=PALETTE["muted"])
+        stored_settings = load_settings()
+
+        def _current(setting):
+            return effective(setting.key, cfg, stored_settings)
+
+        def _on_setting(key: str, value) -> None:
+            """Persist a toggle and apply what can take effect without a restart."""
+            try:
+                stored_settings.clear()
+                stored_settings.update(set_setting(key, value))
+            except Exception as exc:
+                settings_status.value = f"Could not save: {exc}"
+                page.update()
+                return
+            apply_to_config(cfg, stored_settings)
+            settings_status.value = f"Saved {key} = {stored_settings[key]}"
+            page.update()
+
+        settings_page = ft.Column(
+            [
+                ft.Text("Settings", size=18, weight=ft.FontWeight.BOLD),
+                ft.Text(
+                    "Stored per user; anything left untouched still comes from .env.",
+                    size=11,
+                    color=PALETTE["muted"],
+                ),
+                settings_panel(_on_setting, current=_current),
+                settings_status,
+            ],
+            expand=True,
+            spacing=10,
+        )
+        pages = [status_page, charts_page, library_page, discover_page, settings_page]
 
         nav = ft.NavigationRail(
             selected_index=0,
@@ -936,6 +971,7 @@ def run_gui(
                 ft.NavigationRailDestination(icon=ft.Icons.SHOW_CHART, label="Charts"),
                 ft.NavigationRailDestination(icon=ft.Icons.LIBRARY_BOOKS, label="Library"),
                 ft.NavigationRailDestination(icon=ft.Icons.SEARCH, label="Discover"),
+                ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
             ],
         )
         content_area = ft.Container(

@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Clients that consume this Ollama server. Copy to clients.json and set",
+    "CLIENT_CONFIG=clients.json in .env (clients.json is gitignored).",
+    "",
+    "models            - warn when a model the client needs is installed nowhere.",
+    "context_length    - static declaration of the client's context window.",
+    "context_length_file / context_length_key - read the window from the client's OWN",
+    "                    config, so the check follows drift instead of trusting a",
+    "                    number someone typed here once. The key is a dotted path;",
+    "                    when it lands on a mapping the largest integer under it wins.",
+    "context_length_match - keep only mapping keys containing this substring. Needed",
+    "                    when one file holds several providers and a cloud model",
+    "                    really does have a 200k window, which would otherwise be",
+    "                    compared against a 65k local server and cry wolf.",
+    "",
+    "Point it at the file that actually CONTROLS behaviour. Hermes' effective window",
+    "comes from providers.<name>.models.<model>.context_length, which overrides its",
+    "auto-probed context_length_cache.yaml -- so that cache legitimately still holds",
+    "the model's architectural 262144 and is not a misconfiguration.",
+    "",
+    "A client sized to a larger window than OLLAMA_CONTEXT_LENGTH will fill the real",
+    "one and have every reply truncated -- see AGENTS.md."
+  ],
+  "clients": [
+    {
+      "name": "hermes",
+      "models": [
+        "qwen3.8:27b-heretic"
+      ],
+      "context_length_file": "%LOCALAPPDATA%/hermes/config.yaml",
+      "context_length_key": "providers.local-ollama.models"
+    },
+    {
+      "name": "open-webui",
+      "models": [
+        "qwen3.8:27b-heretic",
+        "bge-m3"
+      ]
+    }
+  ]
+}

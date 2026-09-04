@@ -43,6 +43,7 @@ from ollama_sentinel.client_config import (
     inventory_is_complete,
     load_client_config,
     missing_client_models,
+    overcommitted_clients,
 )
 from ollama_sentinel.show import ShowCache
 
@@ -219,6 +220,67 @@ def _doctor_log_cfg() -> tuple[dict[str, str], str | None]:
     return advisor_log_context()
 
 
+def _int_or_none(raw: str | None) -> int | None:
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _maybe_auto_update(snapshots) -> None:
+    """Apply a staged Ollama update when the user has opted in and it is quiet.
+
+    Local host only: the installer and its logs live beside the server, not on
+    whichever machine happens to be running this monitor.
+    """
+    try:
+        from ollama_sentinel.activity import build_server_activity
+        from ollama_sentinel.ollama_update import maybe_auto_apply
+        from ollama_sentinel.settings import effective
+
+        local = next((s for s in snapshots if s.get("local_gpu", True)), None)
+        if local is None:
+            return
+        idle_seconds = float(effective("update_idle_seconds"))
+        # recent_requests is pre-filtered to fresh_seconds, so it must span the
+        # same window we are about to judge quietness over.
+        activity = build_server_activity(fresh_seconds=max(idle_seconds, 45.0))
+        started, reason = maybe_auto_apply(local, activity, idle_seconds=idle_seconds)
+        if started:
+            print(f"ollama update: {reason}", file=sys.stderr)
+    except Exception:
+        return
+
+
+def _update_status(snapshots):
+    """Staged-update state for the local host; None when it cannot be read."""
+    try:
+        from ollama_sentinel.ollama_update import update_status
+        from ollama_sentinel.settings import effective
+
+        if not effective("update_check"):
+            return None
+
+        local = next((s for s in snapshots if s.get("local_gpu", True)), None)
+        return update_status(running_version=(local or {}).get("version"))
+    except Exception:
+        return None
+
+
+def _ctx_pressure():
+    """Local server.log context pressure; None when the log is unreadable."""
+    try:
+        from ollama_sentinel.ctx_pressure import collect_ctx_pressure
+        from ollama_sentinel.settings import effective
+
+        if not effective("ctx_pressure"):
+            return None
+
+        return collect_ctx_pressure()
+    except Exception:
+        return None
+
+
 def _gather_advisories(
     cfg,
     snapshots: list[dict[str, Any]],
@@ -234,6 +296,13 @@ def _gather_advisories(
         clients, installed, inventory_complete=inventory_is_complete(snapshots)
     )
     log_cfg, keep_alive = _doctor_log_cfg()
+    ctx_report = _ctx_pressure()
+    upd_status = _update_status(snapshots)
+    client_over = overcommitted_clients(
+        clients, (ctx_report.n_ctx_slot if ctx_report else None) or _int_or_none(
+            log_cfg.get("OLLAMA_CONTEXT_LENGTH")
+        )
+    )
 
     findings: list[AdvisorFinding] = []
     for i, snap in enumerate(snapshots):
@@ -252,6 +321,9 @@ def _gather_advisories(
                 log_cfg=log_cfg,
                 keep_alive=keep_alive,
                 client_missing=client_missing if i == 0 else None,
+                client_overcommitted=client_over if i == 0 else None,
+                ctx=ctx_report if snap.get("local_gpu", True) else None,
+                update_status=upd_status if snap.get("local_gpu", True) else None,
                 gpu_data_available=bool(snap.get("gpu_data_available")),
             )
         )
@@ -323,6 +395,79 @@ def cmd_pull(args, cfg) -> int:
         status = event.get("status") or event.get("digest") or event
         print(status)
     return 0
+
+
+def cmd_update(args, cfg) -> int:
+    """Report a staged Ollama update, and optionally install it while idle."""
+    import json as _json
+
+    from ollama_sentinel.activity import build_server_activity
+    from ollama_sentinel.ollama_update import apply_update, idle_verdict, update_status
+
+    servers = {s.name: s for s in cfg.servers}
+    srv = servers.get(args.server) or next((s for s in cfg.servers if s.local_gpu), None)
+    if srv is None:
+        print(f"Unknown server: {args.server}", file=sys.stderr)
+        return 2
+    if not srv.local_gpu:
+        # The staged installer and app.log live on the Ollama host, not here.
+        print(f"{srv.name} is remote; run this on that host", file=sys.stderr)
+        return 2
+
+    snap = poll_all(
+        [{"name": srv.name, "url": srv.url, "local_gpu": srv.local_gpu}],
+        gpu_filter=cfg.gpu_filter,
+        query_gpus_fn=query_gpus,
+    )[0]
+    status = update_status(running_version=snap.get("version"))
+    # Match the quiet window being asked for, or recent_requests is pre-filtered
+    # to 45 s and every server looks idle.
+    activity = build_server_activity(fresh_seconds=max(args.idle_seconds, 45.0))
+    verdict = idle_verdict(snap, activity, idle_seconds=args.idle_seconds)
+
+    if args.json:
+        print(_json.dumps({
+            "running_version": status.running_version,
+            "staged_version": status.staged_version,
+            "installer": str(status.installer) if status.installer else None,
+            "pending": status.pending,
+            "idle": verdict.idle,
+            "idle_reason": verdict.reason,
+        }, indent=2))
+        return 0
+
+    print(status.summary)
+    if not status.pending:
+        return 0
+    print(f"  installer: {status.installer}")
+    print(f"  idle: {verdict.idle} — {verdict.reason}")
+
+    if not args.apply:
+        print("  (pass --apply to install)")
+        return 0
+
+    if not verdict.idle and not args.force:
+        print("Not applying: server is in use. Use --force to override.", file=sys.stderr)
+        return 1
+
+    if not args.yes and not args.dry_run:
+        print(
+            "This closes Ollama for about a minute. Any remote client of this "
+            "server loses the API too."
+        )
+        try:
+            answer = input(f"Install {status.staged_version}? [y/N] ").strip().lower()
+        except EOFError:
+            # Scheduled task / piped stdin: refuse rather than crash, and say how
+            # to opt in deliberately.
+            print("No stdin to confirm on; re-run with -y to install unattended.", file=sys.stderr)
+            return 1
+        if answer != "y":
+            return 0
+
+    started, message = apply_update(status.installer, dry_run=args.dry_run)
+    print(message)
+    return 0 if (started or args.dry_run) else 2
 
 
 def cmd_unload(args, cfg) -> int:
@@ -512,6 +657,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "advise":
         return cmd_advise(args, cfg)
 
+    if args.command == "update":
+        return cmd_update(args, cfg)
+
     state_path = cfg.state_file or Path("state.json")
     state = load_state(state_path)
     once_mode = args.once or args.json or args.list
@@ -621,6 +769,7 @@ def main(argv: list[str] | None = None) -> int:
                 notify_transition(t)
         save_state(state_path, new_state)
         state = new_state
+        _maybe_auto_update(snapshots)
         if args.log:
             append_alarm_log(
                 Path(args.log),
