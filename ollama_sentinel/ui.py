@@ -67,6 +67,23 @@ def _free_vram_summary(gpus: list[dict[str, Any]] | None) -> tuple[float | None,
     return free / 1e9, 100 * free / total
 
 
+def loading_caption(server_name: str | None) -> str:
+    """Placeholder shown on every host-scoped panel while a switch poll runs."""
+    return f"Loading {server_name or 'server'}..."
+
+
+def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) -> None:
+    """Drop cached snap / poll age so the footer cannot claim the previous host."""
+    last_snap.clear()
+    poll_state["polled_ts"] = None
+    poll_state["stale"] = False
+
+
+def show_local_process_panels(local_gpu: bool) -> bool:
+    """Process VRAM and gaming are this machine's data, not a remote Ollama URL."""
+    return bool(local_gpu)
+
+
 def run_gui(
     cfg: AppConfig,
     *,
@@ -627,25 +644,28 @@ def run_gui(
             proc_vram_host.controls.clear()
             if proc_collector:
                 pv = proc_collector.get_snapshot()
+                # Always ingest local runner util for charts; only paint the
+                # table when the selected server is this machine.
                 if metrics_store is not None and pv.get("rows"):
                     metrics_store.ingest_proc_vram(
                         pv.get("rows") or [],
                         ts=pv.get("polled_at_ts"),
                     )
-                pv_ts = pv.get("polled_at_ts")
-                pv_age = format_poll_age(pv_ts, now) if pv_ts is not None else None
-                pv_stale = bool(
-                    pv.get("stale")
-                    or (pv_ts is not None and is_stale(pv_ts, cfg.proc_vram_interval, now))
-                )
-                proc_vram_host.controls.append(
-                    process_vram_table(
-                        pv.get("rows") or [],
-                        stale=pv_stale,
-                        age_text=pv_age,
-                        error=pv.get("error"),
+                if show_local_process_panels(srv.local_gpu):
+                    pv_ts = pv.get("polled_at_ts")
+                    pv_age = format_poll_age(pv_ts, now) if pv_ts is not None else None
+                    pv_stale = bool(
+                        pv.get("stale")
+                        or (pv_ts is not None and is_stale(pv_ts, cfg.proc_vram_interval, now))
                     )
-                )
+                    proc_vram_host.controls.append(
+                        process_vram_table(
+                            pv.get("rows") or [],
+                            stale=pv_stale,
+                            age_text=pv_age,
+                            error=pv.get("error"),
+                        )
+                    )
 
             library_host.controls.clear()
             if reachable:
@@ -691,7 +711,7 @@ def run_gui(
 
             unload_all_btn.disabled = not reachable or not bool(snap.get("models"))
 
-            if gaming_watcher:
+            if gaming_watcher and show_local_process_panels(srv.local_gpu):
                 gst = gaming_watcher.get_status()
                 mode = "yield on" if cfg.gaming_yield else "observe"
                 gaming_status.value = f"Gaming: {gst.get('status', 'idle')} ({mode})"
@@ -984,6 +1004,46 @@ def run_gui(
             padding=ft.Padding(left=8),
         )
 
+        def blank_for_server(name: str | None) -> None:
+            """Wipe every host-scoped panel so the previous device cannot linger.
+
+            refresh() can take tens of seconds on an unreachable host; anything
+            left painted would be attributed to the newly selected server.
+            """
+            caption = loading_caption(name)
+            clear_switch_state(last_snap, poll_state)
+            last_advisories.clear()
+
+            models_host.controls.clear()
+            models_host.controls.append(
+                ft.Text(caption, size=12, color=PALETTE["muted"])
+            )
+            gpu_host.controls.clear()
+            proc_vram_host.controls.clear()
+            activity_host.content = None
+            alarm_host.content = None
+
+            library_host.controls.clear()
+            library_host.controls.append(
+                ft.Text(caption, size=12, color=PALETTE["muted"])
+            )
+            charts_subtitle_text.value = caption
+            charts_host.controls.clear()
+            charts_host.controls.append(
+                ft.Text(caption, size=12, color=PALETTE["muted"])
+            )
+
+            poll_footer.value = caption
+            poll_footer.color = PALETTE["muted"]
+            advisor_status.value = ""
+            advisor_status.color = PALETTE["muted"]
+            doctor_status.value = ""
+            doctor_status.color = PALETTE["muted"]
+            gaming_status.value = ""
+            gaming_status.color = PALETTE["muted"]
+            unload_status.value = ""
+            unload_all_btn.disabled = True
+
         def on_server_change(_e) -> None:
             """Switch servers without freezing the window.
 
@@ -992,16 +1052,7 @@ def run_gui(
             locked the UI for up to half a minute on an unreachable host.
             Every other I/O path in this file already uses a worker thread.
             """
-            name = current_server.value
-            models_host.controls.clear()
-            models_host.controls.append(
-                ft.Text(f"Loading {name}...", size=12, color=PALETTE["muted"])
-            )
-            gpu_host.controls.clear()
-            proc_vram_host.controls.clear()
-            activity_host.content = None
-            alarm_host.content = None
-            last_snap.clear()
+            blank_for_server(current_server.value)
             page.update()
             threading.Thread(target=refresh, daemon=True).start()
 
