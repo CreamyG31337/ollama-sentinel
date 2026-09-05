@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,8 +182,28 @@ def _no_window() -> dict:
     return {"creationflags": flags, "startupinfo": si}
 
 
-def query_driver_cuda() -> tuple[str | None, str | None]:
-    """Return ``(driver_version, cuda_umd_version)`` from nvidia-smi, or nulls."""
+_DRIVER_CUDA_CACHE: tuple[float, str | None, str | None] | None = None
+
+
+def query_driver_cuda(
+    *,
+    ttl: float = 300.0,
+    force: bool = False,
+) -> tuple[str | None, str | None]:
+    """Return ``(driver_version, cuda_umd_version)`` from nvidia-smi.
+
+    Cached: the full ``nvidia-smi`` table used for CUDA UMD is expensive and
+    was being hit on every GUI poll, which could stall the Flet thread when
+    Refresh ran inline. Driver version alone is a cheap CSV query; the banner
+    parse is throttled by ``ttl``.
+    """
+    global _DRIVER_CUDA_CACHE
+    now = time.time()
+    if not force and _DRIVER_CUDA_CACHE is not None:
+        cached_at, ver, cuda = _DRIVER_CUDA_CACHE
+        if now - cached_at < ttl:
+            return ver, cuda
+
     driver_version = None
     try:
         ver = subprocess.run(
@@ -203,19 +224,26 @@ def query_driver_cuda() -> tuple[str | None, str | None]:
         pass
 
     cuda = None
-    try:
-        banner = subprocess.run(
-            ["nvidia-smi"],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-            **_no_window(),
-        )
-        if banner.returncode == 0:
-            cuda = parse_smi_cuda_version(banner.stdout or "")
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        pass
+    # Prefer prior CUDA UMD within the same process; only pay for a full
+    # banner parse on first probe or force refresh.
+    if _DRIVER_CUDA_CACHE is not None and not force:
+        cuda = _DRIVER_CUDA_CACHE[2]
+    if cuda is None or force:
+        try:
+            banner = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                **_no_window(),
+            )
+            if banner.returncode == 0:
+                cuda = parse_smi_cuda_version(banner.stdout or "")
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            pass
+
+    _DRIVER_CUDA_CACHE = (now, driver_version, cuda)
     return driver_version, cuda
 
 

@@ -518,43 +518,13 @@ def run_gui(
             show_by_model: dict[str, dict[str, Any]] = {}
             last_advisories.clear()
 
+            # Doctor (registry + nvidia-smi CUDA probe) runs after Status paints —
+            # it was blocking the first frame of every refresh on the local host.
             doctor_alarms: list[dict[str, Any]] = []
-            if reachable and srv.local_gpu and sys.platform == "win32":
-                try:
-                    inputs = collect_doctor_inputs()
-                    proc_rows = None
-                    if proc_collector:
-                        proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
-                    findings = run_doctor(
-                        snap,
-                        registry=inputs["registry"],
-                        log_cfg=inputs["log_cfg"],
-                        log_path=inputs["log_path"],
-                        runners=inputs["runners"],
-                        proc_rows=proc_rows,
-                        ollama_url=cfg.ollama_url,
-                        registry_mtime=inputs["registry_mtime"],
-                        restart_remedy=inputs["restart_remedy"],
-                        driver_version=inputs.get("driver_version"),
-                        driver_cuda=inputs.get("driver_cuda"),
-                    )
-                    doctor_alarms = evaluate_doctor_alarms(findings)
-                    active = list(active) + doctor_alarms
-                    new_state.active_ids = {a["id"] for a in active}
-                except Exception:
-                    doctor_alarms = []
+            doctor_status.value = ""
+            doctor_status.color = PALETTE["muted"]
 
             save_state(cfg.state_file, new_state)
-
-            if doctor_alarms:
-                n = len(doctor_alarms)
-                doctor_status.value = (
-                    f"Doctor: {n} warning{'s' if n != 1 else ''} — run ollama-sentinel doctor"
-                )
-                doctor_status.color = PALETTE["warn"]
-            else:
-                doctor_status.value = ""
-                doctor_status.color = PALETTE["muted"]
 
             advisor_status.value = ""
             advisor_status.color = PALETTE["muted"]
@@ -742,6 +712,56 @@ def run_gui(
 
             update_charts()
             page.update()
+
+            # Doctor after first paint (local host only).
+            if (
+                reachable
+                and srv.local_gpu
+                and sys.platform == "win32"
+                and refresh_guard.still_current(my_seq, srv.name, current_server.value)
+            ):
+                try:
+                    inputs = collect_doctor_inputs()
+                    if not refresh_guard.still_current(
+                        my_seq, srv.name, current_server.value
+                    ):
+                        return
+                    proc_rows = None
+                    if proc_collector:
+                        proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
+                    findings = run_doctor(
+                        snap,
+                        registry=inputs["registry"],
+                        log_cfg=inputs["log_cfg"],
+                        log_path=inputs["log_path"],
+                        runners=inputs["runners"],
+                        proc_rows=proc_rows,
+                        ollama_url=cfg.ollama_url,
+                        registry_mtime=inputs["registry_mtime"],
+                        restart_remedy=inputs["restart_remedy"],
+                        driver_version=inputs.get("driver_version"),
+                        driver_cuda=inputs.get("driver_cuda"),
+                    )
+                    doctor_alarms = evaluate_doctor_alarms(findings)
+                    if doctor_alarms:
+                        active = list(active) + doctor_alarms
+                        new_state.active_ids = {a["id"] for a in active}
+                        save_state(cfg.state_file, new_state)
+                        alarm_host.content = alarm_banner(
+                            reachable,
+                            active,
+                            error=snap.get("error"),
+                            optional=bool(snap.get("optional")),
+                        )
+                        n = len(doctor_alarms)
+                        doctor_status.value = (
+                            f"Doctor: {n} warning"
+                            f"{'s' if n != 1 else ''} — run ollama-sentinel doctor"
+                        )
+                        doctor_status.color = PALETTE["warn"]
+                    page.update()
+                except Exception:
+                    pass
 
             # Second pass: enrich Library / advisor without blocking Status.
             if (
@@ -1001,9 +1021,18 @@ def run_gui(
             on_click=lambda _: request_unload_all(),
             disabled=True,
         )
+
+        def kick_refresh(_=None) -> None:
+            """Never run refresh on the Flet event thread.
+
+            refresh() does HTTP, nvidia-smi, registry reads and /api/show;
+            inline on_click froze the window. Same worker path as host switch.
+            """
+            threading.Thread(target=refresh, daemon=True).start()
+
         action_row = ft.Row(
             [
-                ft.ElevatedButton("Refresh", on_click=refresh),
+                ft.ElevatedButton("Refresh", on_click=kick_refresh),
                 ft.OutlinedButton("Restart", on_click=lambda _: request_restart_app()),
                 unload_all_btn,
             ],
@@ -1229,7 +1258,7 @@ def run_gui(
         nav.on_change = on_nav
         body = ft.Row([nav, ft.VerticalDivider(width=1), content_area], expand=True)
         page.add(body)
-        refresh()
+        kick_refresh()
         do_search()
 
         def poll_loop():
