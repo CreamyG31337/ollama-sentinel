@@ -63,6 +63,30 @@ class RefreshGuardTests(unittest.TestCase):
         self.assertEqual(len(seen), 50)
         self.assertEqual(len(set(seen)), 50, "tickets must be unique under concurrency")
 
+    def test_invalidate_drops_in_flight_poll(self):
+        """Blank-on-switch must kill a poll that started for the previous host."""
+        g = RefreshGuard()
+        slow = g.issue()
+        g.invalidate()
+        fresh = g.issue()
+        self.assertTrue(g.accept(fresh, target="beta", current="beta"))
+        self.assertFalse(g.accept(slow, target="alpha", current="beta"))
+        self.assertFalse(g.accept(slow, target="beta", current="beta"))
+
+    def test_still_current_after_accept(self):
+        g = RefreshGuard()
+        seq = g.issue()
+        g.accept(seq, target="alpha", current="alpha")
+        self.assertTrue(g.still_current(seq, "alpha", "alpha"))
+        self.assertFalse(g.still_current(seq, "alpha", "beta"))
+
+    def test_still_current_false_after_invalidate(self):
+        g = RefreshGuard()
+        seq = g.issue()
+        g.accept(seq, target="alpha", current="alpha")
+        g.invalidate()
+        self.assertFalse(g.still_current(seq, "alpha", "alpha"))
+
 
 if __name__ == "__main__":
     unittest.main()

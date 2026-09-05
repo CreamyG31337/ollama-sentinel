@@ -20,7 +20,7 @@ from ollama_sentinel.inventory import build_inventory, free_vram_bytes
 
 @dataclass
 class DoctorFinding:
-    check: str  # drift | orphan | derived | footgun | info
+    check: str  # drift | orphan | derived | footgun | cuda | info
     severity: str  # pass | warn | fail | unknown
     id: str
     message: str
@@ -338,6 +338,55 @@ def check_footguns(
     return findings
 
 
+def check_cuda_compat(
+    *,
+    log_path: Path | None = None,
+    log_text: str | None = None,
+    driver_version: str | None = None,
+    driver_cuda: str | None = None,
+) -> list[DoctorFinding]:
+    """Warn when the display driver's CUDA UMD cannot host Ollama's cuda_vN."""
+    from ollama_sentinel.cuda_compat import probe_cuda_compat
+
+    probe = probe_cuda_compat(
+        log_path=log_path,
+        log_text=log_text,
+        driver_version=driver_version,
+        driver_cuda=driver_cuda,
+    )
+    if probe.ok:
+        if probe.ollama_cuda_major is not None and probe.driver_cuda:
+            return [
+                DoctorFinding(
+                    check="cuda",
+                    severity="pass",
+                    id="cuda:compat:ok",
+                    message=(
+                        f"CUDA ok — Ollama cuda_v{probe.ollama_cuda_major} on driver "
+                        f"CUDA {probe.driver_cuda}"
+                        + (f" ({probe.driver_version})" if probe.driver_version else "")
+                    ),
+                )
+            ]
+        return [
+            DoctorFinding(
+                check="cuda",
+                severity="info",
+                id="cuda:compat:unknown",
+                message=probe.reason or "CUDA compatibility not measured yet",
+            )
+        ]
+    return [
+        DoctorFinding(
+            check="cuda",
+            severity="warn",
+            id="cuda:compat:mismatch",
+            message=probe.reason or "CUDA driver mismatch",
+            remedy="Install a newer NVIDIA display driver, then restart Ollama",
+        )
+    ]
+
+
 def run_doctor(
     snapshot: dict[str, Any],
     *,
@@ -349,6 +398,8 @@ def run_doctor(
     ollama_url: str = "http://127.0.0.1:11434",
     registry_mtime: float | None = None,
     restart_remedy: str | None = None,
+    driver_version: str | None = None,
+    driver_cuda: str | None = None,
 ) -> list[DoctorFinding]:
     """Run all doctor checks. Pure given inputs (callers supply I/O)."""
     findings: list[DoctorFinding] = []
@@ -366,11 +417,19 @@ def run_doctor(
             registry_mtime=registry_mtime,
         )
     )
+    findings.extend(
+        check_cuda_compat(
+            log_path=log_path,
+            driver_version=driver_version,
+            driver_cuda=driver_cuda,
+        )
+    )
     return findings
 
 
 def collect_doctor_inputs() -> dict[str, Any]:
     """Gather Windows I/O inputs for run_doctor. Safe on non-Windows."""
+    from ollama_sentinel.cuda_compat import query_driver_cuda
     from ollama_sentinel.doctor_win import (
         build_restart_remedy,
         list_llama_server_processes,
@@ -382,6 +441,9 @@ def collect_doctor_inputs() -> dict[str, Any]:
     log_cfg = parse_server_log(log_path) if log_path else {}
     registry = {key: read_registry_env(key) for key in TRACKED_KEYS}
     runners = list_llama_server_processes() if sys.platform == "win32" else []
+    driver_version, driver_cuda = (None, None)
+    if sys.platform == "win32":
+        driver_version, driver_cuda = query_driver_cuda()
     return {
         "registry": registry,
         "log_cfg": log_cfg,
@@ -389,6 +451,8 @@ def collect_doctor_inputs() -> dict[str, Any]:
         "runners": runners,
         "registry_mtime": registry_env_mtime(),
         "restart_remedy": build_restart_remedy(),
+        "driver_version": driver_version,
+        "driver_cuda": driver_cuda,
     }
 
 
@@ -413,5 +477,9 @@ def evaluate_doctor_alarms(findings: list[DoctorFinding]) -> list[dict[str, Any]
         elif f.check == "orphan" and f.id.startswith("runner:orphan:") and f.id != "runner:orphan:ok":
             alarms.append(
                 {"id": f.id, "type": "orphan", "message": f.message}
+            )
+        elif f.check == "cuda" and f.id == "cuda:compat:mismatch":
+            alarms.append(
+                {"id": f.id, "type": "cuda", "message": f.message}
             )
     return alarms

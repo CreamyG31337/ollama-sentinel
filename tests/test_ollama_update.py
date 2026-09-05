@@ -18,6 +18,7 @@ from ollama_sentinel.ollama_update import (
     UpdateStatus,
     apply_update,
     find_staged_installer,
+    format_update_status_line,
     idle_verdict,
     staged_version_from_app_log,
     update_status,
@@ -214,6 +215,53 @@ class AdvisorTest(unittest.TestCase):
             )
         }
         self.assertNotIn("config:update_pending:local", ids)
+
+
+class FormatStatusLineTest(unittest.TestCase):
+    def test_hidden_when_nothing_pending(self):
+        text, key = format_update_status_line(
+            pending=False,
+            summary="Ollama 0.33.2 is current",
+            auto_apply=True,
+            started=False,
+            reason="no update staged",
+        )
+        self.assertEqual(text, "")
+        self.assertEqual(key, "muted")
+
+    def test_auto_apply_shows_idle_refusal(self):
+        text, key = format_update_status_line(
+            pending=True,
+            summary="Ollama 0.33.3 downloaded and waiting (running 0.33.2)",
+            auto_apply=True,
+            started=False,
+            reason="model loaded (qwen) — someone may be mid-conversation",
+        )
+        self.assertIn("model loaded", text)
+        self.assertIn("Update pending", text)
+        self.assertEqual(key, "warn")
+
+    def test_manual_mode_shows_summary_only(self):
+        text, key = format_update_status_line(
+            pending=True,
+            summary="Ollama 0.33.3 downloaded and waiting (running 0.33.2)",
+            auto_apply=False,
+            started=False,
+            reason="",
+        )
+        self.assertIn("0.33.3", text)
+        self.assertEqual(key, "muted")
+
+    def test_started_installer(self):
+        text, key = format_update_status_line(
+            pending=True,
+            summary="…",
+            auto_apply=True,
+            started=True,
+            reason="started OllamaSetup.exe (~1 min; the API drops while it runs)",
+        )
+        self.assertIn("started", text)
+        self.assertEqual(key, "warn")
 
 
 class NestedYamlTest(unittest.TestCase):

@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,18 +223,58 @@ def apply_update(
         subprocess.Popen(cmd, cwd=str(installer.parent), close_fds=True, **kwargs)
     except OSError as exc:
         return False, f"failed to start installer: {exc}"
+    note_update_started()
     return True, f"started {installer.name} (~1 min; the API drops while it runs)"
 
 
 #: Set once an installer has been launched, so a poll loop cannot start a second
 #: one while the first is still tearing the server down.
 _APPLIED_THIS_PROCESS = False
+_APPLIED_AT: float | None = None
+# Installer run measured ~47s; keep explaining refuse/timeout as "updating"
+# until well after Ollama should be back.
+UPDATE_DOWN_GRACE_S = 120.0
 
 
 def reset_auto_apply_guard() -> None:
     """Test hook — clears the once-per-process latch."""
-    global _APPLIED_THIS_PROCESS
+    global _APPLIED_THIS_PROCESS, _APPLIED_AT
     _APPLIED_THIS_PROCESS = False
+    _APPLIED_AT = None
+
+
+def note_update_started(*, at: float | None = None) -> None:
+    """Record that the installer was launched (API will drop for ~1 min)."""
+    global _APPLIED_THIS_PROCESS, _APPLIED_AT
+    _APPLIED_THIS_PROCESS = True
+    _APPLIED_AT = time.time() if at is None else at
+
+
+def update_in_progress(*, now: float | None = None) -> bool:
+    """True while a just-started installer is expected to keep the API down."""
+    if not _APPLIED_THIS_PROCESS or _APPLIED_AT is None:
+        return False
+    tick = time.time() if now is None else now
+    return (tick - _APPLIED_AT) < UPDATE_DOWN_GRACE_S
+
+
+def updating_unreachable_message() -> str:
+    return (
+        "Ollama update in progress — the installer stops the API for about a minute, "
+        "then relaunches the server"
+    )
+
+
+def explain_unreachable_while_updating(
+    error: str | None = None,
+    *,
+    local_gpu: bool = False,
+    now: float | None = None,
+) -> str | None:
+    """Replace refuse/timeout copy when the local host is mid-update."""
+    if not local_gpu or not update_in_progress(now=now):
+        return None
+    return updating_unreachable_message()
 
 
 def maybe_auto_apply(
@@ -276,6 +317,30 @@ def maybe_auto_apply(
         return False, verdict.reason
 
     started, message = apply_update(status.installer, dry_run=dry_run)
-    if started:
-        _APPLIED_THIS_PROCESS = True
+    # apply_update already latches via note_update_started()
     return started, message
+
+
+def format_update_status_line(
+    *,
+    pending: bool,
+    summary: str,
+    auto_apply: bool,
+    started: bool,
+    reason: str,
+    installing: bool = False,
+) -> tuple[str, str]:
+    """Status-page caption for a pending / just-started update.
+
+    Returns ``(text, palette_key)``. Empty text means hide the line. When
+    auto-apply is on but the idle gate refuses, ``reason`` is that refusal so
+    the user can see why flipping the toggle did nothing.
+    """
+    if installing or started:
+        detail = reason if (started and reason) else updating_unreachable_message()
+        return f"Update: {detail}", "warn"
+    if not pending:
+        return "", "muted"
+    if auto_apply and reason:
+        return f"Update pending — {reason}", "warn"
+    return f"Update: {summary}", "muted"

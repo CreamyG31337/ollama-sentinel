@@ -140,12 +140,17 @@ def test_evaluate_doctor_alarms_maps_a_and_b_only():
         DoctorFinding("orphan", "warn", "runner:orphan:1", "orphan"),
         DoctorFinding("derived", "warn", "config:stale_keepalive:x", "derived"),
         DoctorFinding("footgun", "warn", "config:footgun:ollama_url", "footgun"),
+        DoctorFinding("cuda", "warn", "cuda:compat:mismatch", "cuda behind"),
         DoctorFinding("drift", "pass", "config:drift:ok", "ok"),
     ]
     alarms = evaluate_doctor_alarms(findings)
     ids = {a["id"] for a in alarms}
-    assert ids == {"config:drift:OLLAMA_HOST", "runner:orphan:1"}
-    assert all(a["type"] in ("config", "orphan") for a in alarms)
+    assert ids == {
+        "config:drift:OLLAMA_HOST",
+        "runner:orphan:1",
+        "cuda:compat:mismatch",
+    }
+    assert all(a["type"] in ("config", "orphan", "cuda") for a in alarms)
 
 
 def test_fix_orphans_kills_only_flagged():

@@ -135,6 +135,8 @@ def _doctor_findings_for_snapshots(
                 ollama_url=cfg.ollama_url,
                 registry_mtime=inputs["registry_mtime"],
                 restart_remedy=inputs["restart_remedy"],
+                driver_version=inputs.get("driver_version"),
+                driver_cuda=inputs.get("driver_cuda"),
             )
         )
         break  # one local doctor pass per cycle
@@ -549,6 +551,8 @@ def cmd_doctor(args, cfg) -> int:
         ollama_url=cfg.ollama_url,
         registry_mtime=inputs["registry_mtime"],
         restart_remedy=inputs["restart_remedy"],
+        driver_version=inputs.get("driver_version"),
+        driver_cuda=inputs.get("driver_cuda"),
     )
     exit_code = findings_exit_code(findings)
 

@@ -34,6 +34,18 @@ class RefreshGuard:
             self._issued += 1
             return self._issued
 
+    def invalidate(self) -> int:
+        """Drop every in-flight refresh — used the instant the user switches hosts.
+
+        Any poll that already started has a lower ticket and will be refused by
+        ``accept``, so it cannot repaint the previous device's numbers over the
+        blank loading state.
+        """
+        with self._lock:
+            self._issued += 1
+            self._applied = self._issued
+            return self._issued
+
     def accept(self, seq: int, target: str | None, current: str | None) -> bool:
         """True if this result should be applied to the UI.
 
@@ -48,6 +60,17 @@ class RefreshGuard:
                 return False
             self._applied = seq
             return True
+
+    def still_current(self, seq: int, target: str | None, current: str | None) -> bool:
+        """True if this ticket is still the latest applied view for ``target``.
+
+        Used after a slow follow-up (advisor /api/show) so enrichment cannot
+        paint over a newer switch.
+        """
+        with self._lock:
+            if current is not None and target is not None and target != current:
+                return False
+            return seq == self._applied
 
     @property
     def applied(self) -> int:

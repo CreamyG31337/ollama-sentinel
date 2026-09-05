@@ -72,6 +72,15 @@ def loading_caption(server_name: str | None) -> str:
     return f"Loading {server_name or 'server'}..."
 
 
+def host_context_line(name: str | None, url: str | None, *, loading: bool = False) -> str:
+    """Always-visible attribution: which host the panels below belong to."""
+    label = name or "server"
+    endpoint = url or ""
+    if loading:
+        return f"Loading {label}  ·  {endpoint}".rstrip(" ·")
+    return f"{label}  ·  {endpoint}".rstrip(" ·")
+
+
 def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) -> None:
     """Drop cached snap / poll age so the footer cannot claim the previous host."""
     last_snap.clear()
@@ -258,7 +267,17 @@ def run_gui(
             label="Server",
             value=server_names[0] if server_names else None,
             options=[ft.dropdown.Option(n) for n in server_names],
-            width=220,
+            width=280,
+        )
+        _first = servers[0] if servers else None
+        host_banner = ft.Text(
+            host_context_line(
+                _first.name if _first else None,
+                _first.url if _first else None,
+            ),
+            size=15,
+            weight=ft.FontWeight.BOLD,
+            color=PALETTE["muted"],
         )
         alarm_host = ft.Container()
         gpu_host = ft.Column(spacing=8)
@@ -268,6 +287,7 @@ def run_gui(
         gaming_status = ft.Text("", size=12, color=PALETTE["muted"])
         doctor_status = ft.Text("", size=12, color=PALETTE["muted"])
         advisor_status = ft.Text("", size=12, color=PALETTE["muted"])
+        update_status_line = ft.Text("", size=12, color=PALETTE["muted"])
         show_cache = ShowCache(ttl=cfg.show_cache_ttl) if cfg.advisor else None
         last_advisories: list = []
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
@@ -481,53 +501,22 @@ def run_gui(
             last_snap.update(snap)
             reachable = bool(snap.get("reachable"))
 
+            host_banner.value = host_context_line(srv.name, srv.url, loading=False)
+            host_banner.color = PALETTE["ok"] if reachable else (
+                PALETTE["warn"] if snap.get("optional") else PALETTE["alarm"]
+            )
+
             if metrics_store is not None:
                 metrics_store.ingest_snapshot(snap)
 
             state = load_state(cfg.state_file)
             active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
 
-            advisor_findings: list = []
+            # Advisor /api/show is deferred until after Status paints — a remote
+            # library of ~20 models used to block the whole switch for seconds
+            # (or ~30s on a hung show). Status only needs /api/ps + /api/tags.
             show_by_model: dict[str, dict[str, Any]] = {}
-            if cfg.advisor and show_cache is not None and reachable:
-                try:
-                    from ollama_sentinel.client_config import (
-                        installed_model_names,
-                        load_client_config,
-                        missing_client_models,
-                    )
-
-                    names = [
-                        t.get("name") or t.get("model")
-                        for t in snap.get("tags") or []
-                        if t.get("name") or t.get("model")
-                    ]
-                    show_by_model = show_cache.fetch_all(snap["url"], names)
-                    log_cfg, keep_alive = advisor_log_context()
-                    clients = load_client_config(cfg.client_config)
-                    # The GUI shows one server at a time, so a model absent
-                    # here may simply live on another host. Absence is not
-                    # provable from a single snapshot; the CLI, which polls
-                    # every server, is what reports this advisory.
-                    client_missing = missing_client_models(
-                        clients,
-                        installed_model_names([snap]),
-                        inventory_complete=False,
-                    )
-                    advisor_findings = evaluate_advisories(
-                        snap,
-                        show_by_model=show_by_model,
-                        log_cfg=log_cfg,
-                        keep_alive=keep_alive,
-                        client_missing=client_missing or None,
-                        gpu_data_available=bool(snap.get("gpu_data_available")),
-                    )
-                    last_advisories.clear()
-                    last_advisories.extend(advisor_findings)
-                    active = list(active) + evaluate_advisor_alarms(advisor_findings)
-                except Exception:
-                    advisor_findings = []
-                    last_advisories.clear()
+            last_advisories.clear()
 
             doctor_alarms: list[dict[str, Any]] = []
             if reachable and srv.local_gpu and sys.platform == "win32":
@@ -546,6 +535,8 @@ def run_gui(
                         ollama_url=cfg.ollama_url,
                         registry_mtime=inputs["registry_mtime"],
                         restart_remedy=inputs["restart_remedy"],
+                        driver_version=inputs.get("driver_version"),
+                        driver_cuda=inputs.get("driver_cuda"),
                     )
                     doctor_alarms = evaluate_doctor_alarms(findings)
                     active = list(active) + doctor_alarms
@@ -565,28 +556,47 @@ def run_gui(
                 doctor_status.value = ""
                 doctor_status.color = PALETTE["muted"]
 
-            # Fit "may not fit" stays in Library / advise; do not surface as a
-            # GUI warning — only loaded-model spill belongs in that bucket.
-            warn_advisories = [
-                f
-                for f in last_advisories
-                if f.severity == "warn" and f.category != "fit"
-            ]
-            if warn_advisories:
-                advisor_status.value = (
-                    f"Advisor: {len(warn_advisories)} warning"
-                    f"{'s' if len(warn_advisories) != 1 else ''} — run ollama-sentinel advise"
-                )
-                advisor_status.color = PALETTE["warn"]
-            elif last_advisories:
-                advisor_status.value = (
-                    f"Advisor: {len(last_advisories)} note"
-                    f"{'s' if len(last_advisories) != 1 else ''}"
-                )
-                advisor_status.color = PALETTE["muted"]
-            else:
-                advisor_status.value = ""
-                advisor_status.color = PALETTE["muted"]
+            advisor_status.value = ""
+            advisor_status.color = PALETTE["muted"]
+
+            update_status_line.value = ""
+            update_status_line.color = PALETTE["muted"]
+            if srv.local_gpu:
+                try:
+                    from ollama_sentinel.activity import build_server_activity
+                    from ollama_sentinel.ollama_update import (
+                        format_update_status_line,
+                        maybe_auto_apply,
+                        update_status as read_update_status,
+                    )
+                    from ollama_sentinel.settings import effective as setting_value
+
+                    if setting_value("update_check"):
+                        st = read_update_status(running_version=snap.get("version"))
+                        auto = bool(setting_value("update_auto_apply"))
+                        idle_seconds = float(setting_value("update_idle_seconds"))
+                        started, reason = False, ""
+                        if st.pending and auto:
+                            activity = build_server_activity(
+                                fresh_seconds=max(idle_seconds, 45.0)
+                            )
+                            started, reason = maybe_auto_apply(
+                                snap,
+                                activity,
+                                enabled=True,
+                                idle_seconds=idle_seconds,
+                            )
+                        text, key = format_update_status_line(
+                            pending=st.pending,
+                            summary=st.summary,
+                            auto_apply=auto,
+                            started=started,
+                            reason=reason,
+                        )
+                        update_status_line.value = text
+                        update_status_line.color = PALETTE[key]
+                except Exception:
+                    pass
 
             icon = tray_icon.get("icon")
             if icon is not None:
@@ -732,6 +742,105 @@ def run_gui(
 
             update_charts()
             page.update()
+
+            # Second pass: enrich Library / advisor without blocking Status.
+            if (
+                cfg.advisor
+                and show_cache is not None
+                and reachable
+                and refresh_guard.still_current(my_seq, srv.name, current_server.value)
+            ):
+                try:
+                    from ollama_sentinel.client_config import (
+                        installed_model_names,
+                        load_client_config,
+                        missing_client_models,
+                    )
+
+                    names = [
+                        t.get("name") or t.get("model")
+                        for t in snap.get("tags") or []
+                        if t.get("name") or t.get("model")
+                    ]
+                    show_by_model = show_cache.fetch_all(snap["url"], names)
+                    if not refresh_guard.still_current(
+                        my_seq, srv.name, current_server.value
+                    ):
+                        return
+                    log_cfg, keep_alive = advisor_log_context()
+                    clients = load_client_config(cfg.client_config)
+                    # Single-server GUI cannot prove a model is missing fleet-wide.
+                    client_missing = missing_client_models(
+                        clients,
+                        installed_model_names([snap]),
+                        inventory_complete=False,
+                    )
+                    advisor_findings = evaluate_advisories(
+                        snap,
+                        show_by_model=show_by_model,
+                        log_cfg=log_cfg,
+                        keep_alive=keep_alive,
+                        client_missing=client_missing or None,
+                        gpu_data_available=bool(snap.get("gpu_data_available")),
+                    )
+                    last_advisories.clear()
+                    last_advisories.extend(advisor_findings)
+                    advisor_alarms = evaluate_advisor_alarms(advisor_findings)
+                    if advisor_alarms:
+                        active = list(active) + advisor_alarms
+                        new_state.active_ids = {a["id"] for a in active}
+                        save_state(cfg.state_file, new_state)
+                        alarm_host.content = alarm_banner(
+                            reachable,
+                            active,
+                            error=snap.get("error"),
+                            optional=bool(snap.get("optional")),
+                        )
+
+                    warn_advisories = [
+                        f
+                        for f in last_advisories
+                        if f.severity == "warn" and f.category != "fit"
+                    ]
+                    if warn_advisories:
+                        advisor_status.value = (
+                            f"Advisor: {len(warn_advisories)} warning"
+                            f"{'s' if len(warn_advisories) != 1 else ''}"
+                            " — run ollama-sentinel advise"
+                        )
+                        advisor_status.color = PALETTE["warn"]
+                    elif last_advisories:
+                        advisor_status.value = (
+                            f"Advisor: {len(last_advisories)} note"
+                            f"{'s' if len(last_advisories) != 1 else ''}"
+                        )
+                        advisor_status.color = PALETTE["muted"]
+
+                    inv = build_inventory(snap)
+                    if show_by_model:
+                        inv = enrich_inventory_rows(inv, show_by_model)
+                    advisories_by_model = {
+                        r["name"]: advisories_for_model(last_advisories, r["name"])
+                        for r in inv
+                    }
+                    free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
+                    summary = inventory_summary(
+                        inv, free_vram_gb=free_gb, free_vram_pct=free_pct
+                    )
+                    library_host.controls = [
+                        section_card(
+                            "Library",
+                            library_table(
+                                inv,
+                                on_unload=request_unload,
+                                advisories_by_model=advisories_by_model,
+                            ),
+                            subtitle=summary,
+                        )
+                    ]
+                    page.update()
+                except Exception:
+                    pass
 
         def request_pull(model_name: str) -> None:
             srv = get_server_cfg()
@@ -884,7 +993,7 @@ def run_gui(
         def on_discover_sort_change(e) -> None:
             do_search(sort_override=e.control.value)
 
-        discover_sort.on_change = on_discover_sort_change
+        discover_sort.on_select = on_discover_sort_change
         search_field.on_submit = do_search
 
         unload_all_btn = ft.OutlinedButton(
@@ -911,6 +1020,7 @@ def run_gui(
                 gaming_status,
                 doctor_status,
                 advisor_status,
+                update_status_line,
                 unload_status,
                 poll_footer,
                 action_row,
@@ -1000,12 +1110,15 @@ def run_gui(
                 ft.NavigationRailDestination(icon=ft.Icons.SETTINGS, label="Settings"),
             ],
         )
-        content_area = ft.Container(
-            content=ft.Column(
-                [current_server, status_page],
+        def _page_column(page_body: ft.Control) -> ft.Column:
+            return ft.Column(
+                [current_server, host_banner, page_body],
                 expand=True,
                 spacing=10,
-            ),
+            )
+
+        content_area = ft.Container(
+            content=_page_column(status_page),
             expand=True,
             padding=ft.Padding(left=8),
         )
@@ -1015,29 +1128,55 @@ def run_gui(
 
             refresh() can take tens of seconds on an unreachable host; anything
             left painted would be attributed to the newly selected server.
+            Must paint immediately (before the worker poll) so the user sees the
+            switch within a second — not stale numbers under a new dropdown value.
             """
+            # Kill in-flight polls so a late result cannot undo this blank.
+            refresh_guard.invalidate()
             caption = loading_caption(name)
             clear_switch_state(last_snap, poll_state)
             last_advisories.clear()
 
-            models_host.controls.clear()
-            models_host.controls.append(
-                ft.Text(caption, size=12, color=PALETTE["muted"])
-            )
-            gpu_host.controls.clear()
-            proc_vram_host.controls.clear()
-            activity_host.content = None
-            alarm_host.content = None
+            srv = next((s for s in servers if s.name == name), None)
+            url = srv.url if srv else None
+            host_banner.value = host_context_line(name, url, loading=True)
+            host_banner.color = PALETTE["warn"]
 
-            library_host.controls.clear()
-            library_host.controls.append(
-                ft.Text(caption, size=12, color=PALETTE["muted"])
+            alarm_host.content = ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Text(
+                            caption,
+                            size=16,
+                            weight=ft.FontWeight.BOLD,
+                            color=PALETTE["warn"],
+                        ),
+                        ft.Text(
+                            "Waiting for this host — previous server cleared",
+                            size=12,
+                            color=ft.Colors.WHITE70,
+                        ),
+                    ],
+                    spacing=4,
+                ),
+                padding=12,
+                border_radius=8,
+                bgcolor=ft.Colors.ORANGE_900,
             )
+            models_host.controls = [
+                ft.Text(caption, size=12, color=PALETTE["muted"])
+            ]
+            gpu_host.controls = []
+            proc_vram_host.controls = []
+            activity_host.content = None
+
+            library_host.controls = [
+                ft.Text(caption, size=12, color=PALETTE["muted"])
+            ]
             charts_subtitle_text.value = caption
-            charts_host.controls.clear()
-            charts_host.controls.append(
+            charts_host.controls = [
                 ft.Text(caption, size=12, color=PALETTE["muted"])
-            )
+            ]
 
             poll_footer.value = caption
             poll_footer.color = PALETTE["muted"]
@@ -1047,6 +1186,8 @@ def run_gui(
             doctor_status.color = PALETTE["muted"]
             gaming_status.value = ""
             gaming_status.color = PALETTE["muted"]
+            update_status_line.value = ""
+            update_status_line.color = PALETTE["muted"]
             unload_status.value = ""
             unload_all_btn.disabled = True
 
@@ -1059,19 +1200,30 @@ def run_gui(
             Every other I/O path in this file already uses a worker thread.
             """
             blank_for_server(current_server.value)
+            # Push the blank before starting the poll so attribution cannot lag.
+            try:
+                host_banner.update()
+                alarm_host.update()
+                models_host.update()
+                gpu_host.update()
+                proc_vram_host.update()
+                activity_host.update()
+                library_host.update()
+                charts_host.update()
+                charts_subtitle_text.update()
+                poll_footer.update()
+            except Exception:
+                pass
             page.update()
             threading.Thread(target=refresh, daemon=True).start()
 
-        current_server.on_change = on_server_change
+        # Flet 0.80+: Dropdown selection is on_select, not on_change (text typing).
+        current_server.on_select = on_server_change
 
         def on_nav(e):
             idx = int(e.control.selected_index)
             page_body = pages[idx]
-            content_area.content = ft.Column(
-                [current_server, page_body],
-                expand=True,
-                spacing=10,
-            )
+            content_area.content = _page_column(page_body)
             page.update()
 
         nav.on_change = on_nav

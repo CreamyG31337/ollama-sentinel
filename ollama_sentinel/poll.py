@@ -3,16 +3,37 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from urllib.parse import urlparse
 
 from ollama_sentinel.net_errors import format_network_error
 from ollama_sentinel.telemetry import polled_at_iso
 
 
 DEFAULT_TIMEOUT = 10
+# Windows retries SYN several times before WSAECONNREFUSED (~2s on this host).
+# Cap the TCP probe well below that so a dead Ollama fails the switch quickly
+# instead of waiting out the refuse dance (or a full HTTP timeout).
+CONNECT_TIMEOUT = 0.5
+
+
+def _tcp_connect_error(url: str, *, timeout: float = CONNECT_TIMEOUT) -> str | None:
+    """Return a short error if TCP cannot connect; None if the port accepted us."""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return "invalid URL"
+    port = parsed.port or (443 if (parsed.scheme or "").lower() == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return None
+    except OSError as exc:
+        return format_network_error(exc)
 
 
 def _get_json(url: str, path: str, timeout: float = DEFAULT_TIMEOUT) -> tuple[Any | None, str | None]:
@@ -37,8 +58,15 @@ def poll_server(
     gpu_filter: int | None = None,
     query_gpus_fn=None,
     polled_at: float | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    connect_timeout: float = CONNECT_TIMEOUT,
 ) -> dict[str, Any]:
-    """Poll one Ollama server. GPU metrics only if attach_gpus is True."""
+    """Poll one Ollama server. GPU metrics only if attach_gpus is True.
+
+    A short TCP probe runs first so connection-refused / black-holed hosts fail
+    in well under a second. Only then do ``/api/version``, ``/api/ps`` and
+    ``/api/tags`` run concurrently.
+    """
     snapshot: dict[str, Any] = {
         "server": server_name,
         "url": url,
@@ -51,10 +79,26 @@ def poll_server(
         "stale": False,
     }
 
-    version, verr = _get_json(url, "/api/version")
-    ps, perr = _get_json(url, "/api/ps")
-    tags, terr = _get_json(url, "/api/tags")
+    conn_err = _tcp_connect_error(url, timeout=connect_timeout)
+    if conn_err:
+        ts = polled_at if polled_at is not None else time.time()
+        snapshot["polled_at"] = polled_at_iso(ts)
+        snapshot["polled_at_ts"] = ts
+        snapshot["error"] = conn_err
+        if attach_gpus and query_gpus_fn:
+            snapshot["gpus"] = query_gpus_fn(gpu_filter)
+        return snapshot
 
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        fut_version = pool.submit(_get_json, url, "/api/version", timeout)
+        fut_ps = pool.submit(_get_json, url, "/api/ps", timeout)
+        fut_tags = pool.submit(_get_json, url, "/api/tags", timeout)
+        version, verr = fut_version.result()
+        ps, perr = fut_ps.result()
+        tags, terr = fut_tags.result()
+
+    # Stamp when *this* server's poll finished, not when it started — a slow
+    # peer must not backdate a fast one (and vice versa).
     ts = polled_at if polled_at is not None else time.time()
     snapshot["polled_at"] = polled_at_iso(ts)
     snapshot["polled_at_ts"] = ts

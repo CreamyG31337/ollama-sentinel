@@ -165,11 +165,20 @@ class AutoApplyTest(unittest.TestCase):
         self.assertIn("disabled", reason)
 
     def test_busy_server_is_not_interrupted(self):
-        from ollama_sentinel.ollama_update import maybe_auto_apply
+        from pathlib import Path
+        from unittest.mock import patch
 
-        started, reason = maybe_auto_apply(
-            self.snapshot(models=[{"name": "m"}]), enabled=True, idle_seconds=900
+        from ollama_sentinel.ollama_update import UpdateStatus, maybe_auto_apply
+
+        staged = UpdateStatus(
+            running_version="0.33.2",
+            staged_version="0.33.3",
+            installer=Path("OllamaSetup.exe"),
         )
+        with patch("ollama_sentinel.ollama_update.update_status", return_value=staged):
+            started, reason = maybe_auto_apply(
+                self.snapshot(models=[{"name": "m"}]), enabled=True, idle_seconds=900
+            )
         self.assertFalse(started)
         self.assertIn("mid-conversation", reason)
 

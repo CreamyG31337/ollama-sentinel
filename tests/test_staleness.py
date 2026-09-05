@@ -42,21 +42,25 @@ class PolledAtPerServer(unittest.TestCase):
         """
         clock = Clock()
         t0 = clock.value
+        slowed = {"done": False}
 
         def slow_second(url, path, timeout=None):
-            # Simulate an unreachable host paying a full connect timeout.
-            if "second" in url:
-                clock.value += 10.0
+            # One connect-timeout worth of delay for the slow host (HTTP is
+            # parallel now, so don't count 3× path calls).
+            if "second" in url and not slowed["done"]:
+                slowed["done"] = True
+                clock.value += 30.0
             return _ok(url, path, timeout)
 
-        with mock.patch("ollama_sentinel.poll._get_json", side_effect=slow_second):
-            with mock.patch("ollama_sentinel.poll.time.time", clock):
-                snaps = poll_all(
-                    [
-                        {"name": "first", "url": "http://first:11434", "local_gpu": False},
-                        {"name": "second", "url": "http://second:11434", "local_gpu": False},
-                    ]
-                )
+        with mock.patch("ollama_sentinel.poll._tcp_connect_error", return_value=None):
+            with mock.patch("ollama_sentinel.poll._get_json", side_effect=slow_second):
+                with mock.patch("ollama_sentinel.poll.time.time", clock):
+                    snaps = poll_all(
+                        [
+                            {"name": "first", "url": "http://first:11434", "local_gpu": False},
+                            {"name": "second", "url": "http://second:11434", "local_gpu": False},
+                        ]
+                    )
 
         first, second = snaps
         self.assertEqual(first["polled_at_ts"], t0, "fast host keeps its own early stamp")
@@ -65,26 +69,28 @@ class PolledAtPerServer(unittest.TestCase):
 
     def test_explicit_polled_at_still_shared_for_determinism(self):
         """Callers and tests may still pin one timestamp when they want to."""
-        with mock.patch("ollama_sentinel.poll._get_json", side_effect=_ok):
-            snaps = poll_all(
-                [
-                    {"name": "a", "url": "http://a:11434", "local_gpu": False},
-                    {"name": "b", "url": "http://b:11434", "local_gpu": False},
-                ],
-                polled_at=1_700_000_000.0,
-            )
+        with mock.patch("ollama_sentinel.poll._tcp_connect_error", return_value=None):
+            with mock.patch("ollama_sentinel.poll._get_json", side_effect=_ok):
+                snaps = poll_all(
+                    [
+                        {"name": "a", "url": "http://a:11434", "local_gpu": False},
+                        {"name": "b", "url": "http://b:11434", "local_gpu": False},
+                    ],
+                    polled_at=1_700_000_000.0,
+                )
         self.assertEqual(snaps[0]["polled_at_ts"], 1_700_000_000.0)
         self.assertEqual(snaps[1]["polled_at_ts"], 1_700_000_000.0)
 
     def test_fresh_multi_server_poll_is_not_stale(self):
         """The end-to-end symptom: a just-completed poll must not read STALE."""
-        with mock.patch("ollama_sentinel.poll._get_json", side_effect=_ok):
-            snaps = poll_all(
-                [
-                    {"name": "a", "url": "http://a:11434", "local_gpu": False},
-                    {"name": "b", "url": "http://b:11434", "local_gpu": False},
-                ]
-            )
+        with mock.patch("ollama_sentinel.poll._tcp_connect_error", return_value=None):
+            with mock.patch("ollama_sentinel.poll._get_json", side_effect=_ok):
+                snaps = poll_all(
+                    [
+                        {"name": "a", "url": "http://a:11434", "local_gpu": False},
+                        {"name": "b", "url": "http://b:11434", "local_gpu": False},
+                    ]
+                )
         now = time.time()
         for snap in snaps:
             self.assertLess(now - snap["polled_at_ts"], 5.0)

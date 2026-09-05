@@ -140,9 +140,16 @@ def alarm_banner(
     *,
     error: str | None = None,
     optional: bool = False,
+    updating: bool = False,
 ) -> ft.Container:
     if not reachable:
-        if optional:
+        if updating:
+            title, body, key = (
+                "Updating Ollama",
+                error or "Installer is running — API is down for about a minute",
+                "warn",
+            )
+        elif optional:
             title, body, key = "Offline (optional host)", error or "Ollama not reachable", "warn"
         else:
             title, body, key = "Unreachable", error or "Ollama not reachable", "alarm"

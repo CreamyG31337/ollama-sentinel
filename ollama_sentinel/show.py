@@ -6,12 +6,15 @@ import json
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from ollama_sentinel.show_parse import parse_show_bundle
 
-DEFAULT_TIMEOUT = 30
+# Interactive host switches must not wait half a minute on one bad model.
+DEFAULT_TIMEOUT = 5
 DEFAULT_TTL = 900.0
+_SHOW_WORKERS = 8
 
 
 def fetch_show(url: str, model: str, *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
@@ -54,4 +57,19 @@ class ShowCache:
         return bundle
 
     def fetch_all(self, url: str, model_names: list[str]) -> dict[str, dict[str, Any]]:
-        return {name: self.get(url, name) for name in model_names}
+        """Fetch /api/show for every model, in parallel.
+
+        A host with ~20 tags used to take seconds serially (or ~30s if one
+        call hung at the old 30s timeout). Parallelism keeps Library enrichment
+        off the Status paint path's critical time.
+        """
+        if not model_names:
+            return {}
+        if len(model_names) == 1:
+            name = model_names[0]
+            return {name: self.get(url, name)}
+
+        workers = min(_SHOW_WORKERS, len(model_names))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {name: pool.submit(self.get, url, name) for name in model_names}
+            return {name: fut.result() for name, fut in futs.items()}

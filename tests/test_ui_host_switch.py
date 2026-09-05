@@ -6,6 +6,7 @@ import unittest
 
 from ollama_sentinel.ui import (
     clear_switch_state,
+    host_context_line,
     loading_caption,
     show_local_process_panels,
 )
@@ -18,6 +19,19 @@ class HostSwitchBlankTests(unittest.TestCase):
     def test_loading_caption_fallback_when_unset(self):
         self.assertEqual(loading_caption(None), "Loading server...")
         self.assertEqual(loading_caption(""), "Loading server...")
+
+    def test_host_context_line_shows_name_and_url(self):
+        self.assertEqual(
+            host_context_line("ubuntu-rx6800", "http://100.64.188.1:11434"),
+            "ubuntu-rx6800  ·  http://100.64.188.1:11434",
+        )
+
+    def test_host_context_line_loading(self):
+        self.assertTrue(
+            host_context_line("local", "http://127.0.0.1:11434", loading=True).startswith(
+                "Loading local"
+            )
+        )
 
     def test_clear_switch_state_drops_snap_and_poll_age(self):
         last_snap = {"server": "cr-desktop-3090", "models": [{"name": "qwen"}]}
