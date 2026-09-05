@@ -563,12 +563,19 @@ def advisor_log_context() -> tuple[dict[str, str], str | None]:
 
 
 def evaluate_advisor_alarms(findings: list[AdvisorFinding]) -> list[dict[str, Any]]:
-    """Map high/medium warn advisories to passive GUI alarms (not --once exit codes)."""
+    """Map high/medium warn advisories to passive GUI alarms (not --once exit codes).
+
+    Fit advisories are predictive ("may not fit" / tight VRAM). They stay in
+    Library / `advise` output but never become alarms — only a loaded model's
+    actual spill (alarms.py A, or runtime:spill_pinned) belongs in the banner.
+    """
     out: list[dict[str, Any]] = []
     for f in findings:
         if f.severity != "warn":
             continue
         if f.confidence == "low":
+            continue
+        if f.category == "fit":
             continue
         out.append(
             {

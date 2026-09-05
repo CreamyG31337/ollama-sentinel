@@ -565,7 +565,13 @@ def run_gui(
                 doctor_status.value = ""
                 doctor_status.color = PALETTE["muted"]
 
-            warn_advisories = [f for f in last_advisories if f.severity == "warn"]
+            # Fit "may not fit" stays in Library / advise; do not surface as a
+            # GUI warning — only loaded-model spill belongs in that bucket.
+            warn_advisories = [
+                f
+                for f in last_advisories
+                if f.severity == "warn" and f.category != "fit"
+            ]
             if warn_advisories:
                 advisor_status.value = (
                     f"Advisor: {len(warn_advisories)} warning"

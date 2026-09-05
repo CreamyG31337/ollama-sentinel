@@ -69,7 +69,7 @@ class TestAdvisor(unittest.TestCase):
         findings = evaluate_advisories(snap, client_missing=missing)
         self.assertTrue(any(f.id.startswith("config:client_model_missing:") for f in findings))
 
-    def test_advisor_alarms_skip_low_confidence(self) -> None:
+    def test_advisor_alarms_skip_low_confidence_and_fit(self) -> None:
         findings = [
             AdvisorFinding(
                 category="name",
@@ -83,12 +83,31 @@ class TestAdvisor(unittest.TestCase):
                 severity="warn",
                 confidence="medium",
                 id="fit:would_spill:x",
-                message="tight",
+                message="may not fit",
+            ),
+            AdvisorFinding(
+                category="runtime",
+                severity="warn",
+                confidence="high",
+                id="runtime:spill_pinned:x",
+                message="spilled and pinned",
             ),
         ]
         alarms = evaluate_advisor_alarms(findings)
         self.assertEqual(len(alarms), 1)
+        self.assertEqual(alarms[0]["id"], "runtime:spill_pinned:x")
         self.assertEqual(alarms[0]["type"], "advisor")
+
+    def test_fit_would_spill_never_becomes_alarm(self) -> None:
+        """Predictive fit is Library/advise only — not the alarm banner."""
+        snap = _snap(
+            tags=[{"name": "huge", "size": 30e9, "details": {"quantization_level": "Q8_0"}}],
+            gpus=[{"memory_used": 22e9, "memory_total": 24e9}],
+        )
+        findings = evaluate_advisories(snap)
+        self.assertTrue(any(f.id.startswith("fit:would_spill:") for f in findings))
+        alarms = evaluate_advisor_alarms(findings)
+        self.assertFalse(any(a["id"].startswith("fit:") for a in alarms))
 
     def test_advisories_for_model(self) -> None:
         findings = [
