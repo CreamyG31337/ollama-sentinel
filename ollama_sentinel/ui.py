@@ -606,15 +606,6 @@ def run_gui(
                 except Exception:
                     pass
 
-            icon = tray_icon.get("icon")
-            if icon is not None:
-                from ollama_sentinel.tray import set_tray_color
-
-                try:
-                    set_tray_color(icon, active)
-                except Exception:
-                    pass
-
             now = time.time()
             polled_ts = snap.get("polled_at_ts")
             poll_state["polled_ts"] = polled_ts
@@ -656,6 +647,7 @@ def run_gui(
                     models_host.controls.append(models_card)
 
             activity_host.content = None
+            act = None
             if reachable and srv.local_gpu:
                 proc_rows = None
                 if proc_collector:
@@ -669,6 +661,24 @@ def run_gui(
                 card = activity_card(act)
                 if card is not None:
                     activity_host.content = card
+
+            icon = tray_icon.get("icon")
+            if icon is not None:
+                from ollama_sentinel.tray import update_tray
+
+                try:
+                    update_tray(
+                        icon,
+                        reachable=reachable,
+                        alarms=active,
+                        phase=getattr(act, "phase", None) if act is not None else None,
+                        summary=getattr(act, "summary", None) if act is not None else (
+                            snap.get("error") if not reachable else None
+                        ),
+                        server=srv.name,
+                    )
+                except Exception:
+                    pass
 
             proc_vram_host.controls.clear()
             if proc_collector:
