@@ -108,12 +108,44 @@ be explained to someone watching an update that never installs.
 
 Note `build_server_activity(fresh_seconds=...)` must be passed the same window: `recent_requests`
 is pre-filtered to 45 s by default, so a 15-minute check against the default list sees an empty
-list and calls everything idle.
+list and calls everything idle. That list is inference-only (`/chat`, `/generate`, `/embed`,
+`/completions`) — Sentinel’s own `GET /api/ps|/tags|/version` and `POST /api/show` do not count.
 
 Unattended use is opt-in — `ollama-sentinel update --apply -y` from a scheduled task. Without
 `-y` and with no stdin it refuses (exit 1) rather than raising `EOFError`, and when the server is
 busy it declines with exit 1 so the next run simply retries. `--force` overrides the gate and will
 drop in-flight requests, local and remote.
+
+## Activity snooping: what the logs can and cannot show
+
+Status “Last activity” is built from `server.log` plus ESTABLISHED TCP peers on the Ollama
+port. Default logging is **metadata only**:
+
+| Signal | Source | Meaning |
+|---|---|---|
+| `n_gen = N, tg = X t/s` | llama.cpp `print_timing` during generation | tokens emitted so far + speed |
+| `new prompt … task.n_tokens / n_ctx_slot` | slot operator | prompt size and ctx fill |
+| GIN `POST "/v1/chat/completions"` + client IP | access log **after** the request finishes | who called which path |
+| ESTABLISHED peers on `:11434` | OS connection table while streaming | who is holding the socket *now* |
+
+There is **no prompt or response text** in `server.log`. Optional client labels come from
+`clients.json` → `addrs` (IP → name), not from User-Agent (Ollama does not log one).
+
+### Deferred: prompt-body dumps via `OLLAMA_DEBUG_LOG_REQUESTS`
+
+Not enabled on this host. If we ever want request *bodies* in the activity panel:
+
+1. Set User-scope `OLLAMA_DEBUG_LOG_REQUESTS=1` and restart Ollama (tray quit, then relaunch).
+2. On each inference Ollama writes the request body (and a curl replay script) under a temp
+   directory created at server start — not into `server.log`.
+3. Caveats from upstream: dumps tend to appear when the answer finishes (#17437), and
+   **responses are still not logged** (#17438). Sensitive on any bind reachable beyond
+   localhost (this machine serves Open WebUI across the tailnet).
+4. Sentinel could later watch that dump dir; do **not** turn the env var on for shared binds
+   without accepting that prompts land on disk.
+
+Live response *text* would need a MITM proxy in front of `:11434` — out of scope and against
+the read-only posture (GET + log/perf reads only).
 
 ## Settings: a sparse store, not a second config file
 

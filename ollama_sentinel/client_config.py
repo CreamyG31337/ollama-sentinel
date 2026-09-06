@@ -38,6 +38,13 @@ def load_client_config(path: Path | None) -> list[dict[str, Any]]:
         for key in ("context_length_file", "context_length_key", "context_length_match"):
             if entry.get(key):
                 record[key] = str(entry[key])
+        addrs = entry.get("addrs") or []
+        if isinstance(addrs, str):
+            addrs = [addrs]
+        if isinstance(addrs, list):
+            cleaned = [str(a).strip() for a in addrs if a]
+            if cleaned:
+                record["addrs"] = cleaned
         out.append(record)
     return out
 

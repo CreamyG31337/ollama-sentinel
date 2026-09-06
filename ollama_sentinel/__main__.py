@@ -53,8 +53,10 @@ def _attach_activity(
     proc_rows: list[dict[str, Any]] | None,
     cfg,
 ) -> list[dict[str, Any]]:
-    if sys.platform != "win32":
-        return snapshots
+    from ollama_sentinel.activity import build_peer_name_map, listen_port_from_url
+    from ollama_sentinel.client_config import load_client_config
+
+    peer_names = build_peer_name_map(load_client_config(getattr(cfg, "client_config", None)))
     out: list[dict[str, Any]] = []
     for snap in snapshots:
         if not snap.get("reachable"):
@@ -64,7 +66,12 @@ def _attach_activity(
             out.append(snap)
             continue
         enriched = dict(snap)
-        enriched["activity"] = build_server_activity(proc_rows=proc_rows).to_dict()
+        enriched["activity"] = build_server_activity(
+            proc_rows=proc_rows,
+            models=snap.get("models"),
+            peer_names=peer_names,
+            listen_port=listen_port_from_url(snap.get("url") or getattr(cfg, "ollama_url", None)),
+        ).to_dict()
         out.append(enriched)
     return out
 

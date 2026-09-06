@@ -194,6 +194,12 @@ def gpu_table(gpu: dict[str, Any]) -> ft.Control:
     return section_card(name, _metric_table(metrics, footer=throttle))
 
 
+def _activity_client_label(req: dict[str, Any]) -> str:
+    name = req.get("client_name")
+    client = req.get("client") or "?"
+    return f"{name} ({client})" if name else str(client)
+
+
 def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Control | None:
     if activity is None:
         return None
@@ -204,6 +210,14 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
         runners = activity.get("runners") or []
         recent = activity.get("recent_requests") or []
         last_req = activity.get("last_request")
+        peers = activity.get("peers") or []
+        n_gen = activity.get("n_gen")
+        gen_tps = activity.get("gen_tps")
+        gen_tps_3s = activity.get("gen_tps_3s")
+        prompt_tokens = activity.get("prompt_tokens")
+        n_ctx_slot = activity.get("n_ctx_slot")
+        ctx_fill = activity.get("ctx_fill")
+        model = activity.get("model")
     else:
         phase = activity.phase
         summary = activity.summary
@@ -211,6 +225,14 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
         runners = [r.to_dict() for r in activity.runners]
         recent = [r.to_dict() for r in activity.recent_requests]
         last_req = activity.last_request.to_dict() if activity.last_request else None
+        peers = [p.to_dict() for p in activity.peers]
+        n_gen = activity.n_gen
+        gen_tps = activity.gen_tps
+        gen_tps_3s = activity.gen_tps_3s
+        prompt_tokens = activity.prompt_tokens
+        n_ctx_slot = activity.n_ctx_slot
+        ctx_fill = activity.ctx_fill
+        model = activity.model
 
     color = PALETTE["ok"] if phase == "idle" else PALETTE["warn"]
     if phase in ("prompt", "generating", "embed"):
@@ -221,6 +243,32 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
     ]
     if stale:
         lines.append(ft.Text("Log signal stale; using GPU util", size=11, color=PALETTE["stale"]))
+
+    detail_bits: list[str] = []
+    if model and model not in (summary or ""):
+        detail_bits.append(str(model))
+    if prompt_tokens is not None and n_ctx_slot:
+        fill_pct = f" · {ctx_fill * 100:.0f}%" if ctx_fill is not None else ""
+        detail_bits.append(f"prompt {prompt_tokens:,}/{n_ctx_slot:,}{fill_pct}")
+    elif prompt_tokens is not None:
+        detail_bits.append(f"prompt {prompt_tokens:,} tokens")
+    if n_gen is not None:
+        speed = f" @ {gen_tps:.0f} tok/s" if gen_tps is not None else ""
+        if gen_tps_3s is not None:
+            speed += f" (3s {gen_tps_3s:.0f})"
+        detail_bits.append(f"out {n_gen:,}{speed}")
+    if detail_bits:
+        lines.append(ft.Text(" · ".join(detail_bits), size=11, color=PALETTE["muted"]))
+
+    if peers and phase != "idle":
+        peer_bits = []
+        for p in peers[:4]:
+            addr = p.get("addr") or "?"
+            name = p.get("name")
+            peer_bits.append(f"{name} ({addr})" if name else str(addr))
+        lines.append(
+            ft.Text("Peers: " + ", ".join(peer_bits), size=11, color=PALETTE["muted"])
+        )
 
     if runners:
         runner_bits = []
@@ -238,7 +286,7 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
         lines.append(
             ft.Text(
                 f"Last {last_req.get('method')} {last_req.get('path')} "
-                f"({last_req.get('client')}{dur_s})",
+                f"({_activity_client_label(last_req)}{dur_s})",
                 size=11,
                 color=PALETTE["muted"],
             )
@@ -247,7 +295,8 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
         req = recent[-1]
         lines.append(
             ft.Text(
-                f"Recent {req.get('method')} {req.get('path')} ({req.get('client')})",
+                f"Recent {req.get('method')} {req.get('path')} "
+                f"({_activity_client_label(req)})",
                 size=11,
                 color=PALETTE["muted"],
             )

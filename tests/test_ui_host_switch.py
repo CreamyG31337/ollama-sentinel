@@ -7,6 +7,7 @@ import unittest
 from ollama_sentinel.ui import (
     clear_switch_state,
     host_context_line,
+    host_dropdown_label,
     loading_caption,
     show_local_process_panels,
 )
@@ -32,6 +33,17 @@ class HostSwitchBlankTests(unittest.TestCase):
                 "Loading local"
             )
         )
+
+    def test_host_dropdown_label_online_offline(self):
+        self.assertEqual(
+            host_dropdown_label("ubuntu-rx6800", True),
+            "● online  ·  ubuntu-rx6800",
+        )
+        self.assertEqual(
+            host_dropdown_label("ts-desktop-3070", False),
+            "○ offline  ·  ts-desktop-3070",
+        )
+        self.assertIn("…", host_dropdown_label("local", None))
 
     def test_clear_switch_state_drops_snap_and_poll_age(self):
         last_snap = {"server": "cr-desktop-3090", "models": [{"name": "qwen"}]}

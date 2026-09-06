@@ -78,13 +78,31 @@ def _format_activity(snap: dict[str, Any], proc_rows: list[dict[str, Any]] | Non
     if activity is None:
         if not snap.get("local_gpu", True):
             return []
-        import sys
-
-        if sys.platform == "win32":
-            activity = build_server_activity(proc_rows=proc_rows).to_dict()
-        else:
-            return []
+        activity = build_server_activity(
+            proc_rows=proc_rows,
+            models=snap.get("models"),
+            include_peers=False,
+        ).to_dict()
     lines = [f"  Last activity: {activity.get('summary', '—')}"]
+    prompt_tokens = activity.get("prompt_tokens")
+    n_ctx = activity.get("n_ctx_slot")
+    ctx_fill = activity.get("ctx_fill")
+    n_gen = activity.get("n_gen")
+    gen_tps = activity.get("gen_tps")
+    detail: list[str] = []
+    if prompt_tokens is not None and n_ctx:
+        fill = f" ({ctx_fill * 100:.0f}%)" if ctx_fill is not None else ""
+        detail.append(f"prompt {prompt_tokens:,}/{n_ctx:,}{fill}")
+    if n_gen is not None:
+        speed = f" @ {gen_tps:.0f} tok/s" if gen_tps is not None else ""
+        detail.append(f"out {n_gen:,}{speed}")
+    if detail:
+        lines.append(f"    {' · '.join(detail)}")
+    for p in activity.get("peers") or []:
+        addr = p.get("addr") or "?"
+        name = p.get("name")
+        label = f"{name} ({addr})" if name else addr
+        lines.append(f"    peer {label}")
     for r in activity.get("runners") or []:
         util = r.get("engine_3d_pct") or 0
         tag = "busy" if r.get("busy") else "idle"
@@ -94,8 +112,11 @@ def _format_activity(snap: dict[str, Any], proc_rows: list[dict[str, Any]] | Non
         )
     last = activity.get("last_request")
     if last:
+        client = last.get("client_name") or last.get("client")
+        if last.get("client_name") and last.get("client"):
+            client = f"{last['client_name']} ({last['client']})"
         lines.append(
-            f"    last {last.get('method')} {last.get('path')} from {last.get('client')}"
+            f"    last {last.get('method')} {last.get('path')} from {client}"
         )
     return lines
 

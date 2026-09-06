@@ -11,9 +11,14 @@ from typing import Any
 import flet as ft
 
 from ollama_sentinel.metrics import make_metrics_store
-from ollama_sentinel.activity import build_server_activity
+from ollama_sentinel.activity import (
+    build_peer_name_map,
+    build_server_activity,
+    listen_port_from_url,
+)
 from ollama_sentinel.alarms import evaluate_alarms
 from ollama_sentinel.catalog import SEARCH_SORTS, fetch_model_bundle, search_models
+from ollama_sentinel.client_config import load_client_config
 from ollama_sentinel.config import AppConfig, selected_servers
 from ollama_sentinel.doctor import (
     collect_doctor_inputs,
@@ -79,6 +84,15 @@ def host_context_line(name: str | None, url: str | None, *, loading: bool = Fals
     if loading:
         return f"Loading {label}  ·  {endpoint}".rstrip(" ·")
     return f"{label}  ·  {endpoint}".rstrip(" ·")
+
+
+def host_dropdown_label(name: str, online: bool | None) -> str:
+    """Dropdown row text: status marker + server name (key stays the bare name)."""
+    if online is True:
+        return f"● online  ·  {name}"
+    if online is False:
+        return f"○ offline  ·  {name}"
+    return f"· …  ·  {name}"
 
 
 def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) -> None:
@@ -263,11 +277,32 @@ def run_gui(
             gaming_watcher.start()
 
         server_names = [s.name for s in servers]
+        # None = not probed yet; updated by fleet TCP probe + selected-host poll.
+        host_online: dict[str, bool | None] = {s.name: None for s in servers}
+
+        def rebuild_server_options() -> None:
+            selected = current_server.value
+            current_server.options = [
+                ft.dropdown.Option(
+                    key=s.name,
+                    text=host_dropdown_label(s.name, host_online.get(s.name)),
+                )
+                for s in servers
+            ]
+            if selected in host_online:
+                current_server.value = selected
+
         current_server = ft.Dropdown(
             label="Server",
             value=server_names[0] if server_names else None,
-            options=[ft.dropdown.Option(n) for n in server_names],
-            width=280,
+            options=[
+                ft.dropdown.Option(
+                    key=n,
+                    text=host_dropdown_label(n, host_online.get(n)),
+                )
+                for n in server_names
+            ],
+            width=340,
         )
         _first = servers[0] if servers else None
         host_banner = ft.Text(
@@ -500,6 +535,8 @@ def run_gui(
             last_snap.clear()
             last_snap.update(snap)
             reachable = bool(snap.get("reachable"))
+            host_online[srv.name] = reachable
+            rebuild_server_options()
 
             host_banner.value = host_context_line(srv.name, srv.url, loading=False)
             host_banner.color = PALETTE["ok"] if reachable else (
@@ -533,7 +570,6 @@ def run_gui(
             update_status_line.color = PALETTE["muted"]
             if srv.local_gpu:
                 try:
-                    from ollama_sentinel.activity import build_server_activity
                     from ollama_sentinel.ollama_update import (
                         format_update_status_line,
                         maybe_auto_apply,
@@ -548,7 +584,9 @@ def run_gui(
                         started, reason = False, ""
                         if st.pending and auto:
                             activity = build_server_activity(
-                                fresh_seconds=max(idle_seconds, 45.0)
+                                fresh_seconds=max(idle_seconds, 45.0),
+                                models=snap.get("models"),
+                                include_peers=False,
                             )
                             started, reason = maybe_auto_apply(
                                 snap,
@@ -618,11 +656,16 @@ def run_gui(
                     models_host.controls.append(models_card)
 
             activity_host.content = None
-            if reachable and srv.local_gpu and sys.platform == "win32":
+            if reachable and srv.local_gpu:
                 proc_rows = None
                 if proc_collector:
                     proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
-                act = build_server_activity(proc_rows=proc_rows)
+                act = build_server_activity(
+                    proc_rows=proc_rows,
+                    models=snap.get("models"),
+                    peer_names=build_peer_name_map(load_client_config(cfg.client_config)),
+                    listen_port=listen_port_from_url(srv.url),
+                )
                 card = activity_card(act)
                 if card is not None:
                     activity_host.content = card
@@ -1030,6 +1073,30 @@ def run_gui(
             """
             threading.Thread(target=refresh, daemon=True).start()
 
+        def probe_fleet_reachability() -> None:
+            """Lightweight TCP check for every configured host (dropdown dots)."""
+            from concurrent.futures import ThreadPoolExecutor
+
+            from ollama_sentinel.poll import _tcp_connect_error
+
+            def one(srv) -> tuple[str, bool]:
+                return srv.name, _tcp_connect_error(srv.url, timeout=0.5) is None
+
+            try:
+                with ThreadPoolExecutor(max_workers=min(8, max(1, len(servers)))) as pool:
+                    for name, ok in pool.map(one, servers):
+                        host_online[name] = ok
+            except Exception:
+                return
+            rebuild_server_options()
+            try:
+                current_server.update()
+            except Exception:
+                pass
+
+        def kick_fleet_probe() -> None:
+            threading.Thread(target=probe_fleet_reachability, daemon=True).start()
+
         action_row = ft.Row(
             [
                 ft.ElevatedButton("Refresh", on_click=kick_refresh),
@@ -1258,6 +1325,7 @@ def run_gui(
         nav.on_change = on_nav
         body = ft.Row([nav, ft.VerticalDivider(width=1), content_area], expand=True)
         page.add(body)
+        kick_fleet_probe()
         kick_refresh()
         do_search()
 
@@ -1265,6 +1333,7 @@ def run_gui(
             while True:
                 time.sleep(cfg.poll_interval)
                 try:
+                    kick_fleet_probe()
                     refresh()
                 except Exception:
                     pass

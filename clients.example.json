@@ -13,6 +13,9 @@
     "                    when one file holds several providers and a cloud model",
     "                    really does have a 200k window, which would otherwise be",
     "                    compared against a 65k local server and cry wolf.",
+    "addrs             - optional client IPs/hosts for activity-card labels",
+    "                    (GIN peer + ESTABLISHED :11434). Example: 127.0.0.1, ::1,",
+    "                    or a Tailscale IP for Open WebUI on another host.",
     "",
     "Point it at the file that actually CONTROLS behaviour. Hermes' effective window",
     "comes from providers.<name>.models.<model>.context_length, which overrides its",
@@ -28,6 +31,7 @@
       "models": [
         "qwen3.8:27b-heretic"
       ],
+      "addrs": ["127.0.0.1", "::1"],
       "context_length_file": "%LOCALAPPDATA%/hermes/config.yaml",
       "context_length_key": "providers.local-ollama.models"
     },
@@ -36,7 +40,8 @@
       "models": [
         "qwen3.8:27b-heretic",
         "bge-m3"
-      ]
+      ],
+      "addrs": ["100.64.0.1"]
     }
   ]
 }
