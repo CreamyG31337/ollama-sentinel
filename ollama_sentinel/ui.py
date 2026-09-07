@@ -356,7 +356,12 @@ def run_gui(
         # user has already switched away, which used to leave the panels showing
         # one server's data under another server's name.
         refresh_guard = RefreshGuard()
-        library_host = ft.Column(spacing=8, expand=True)
+        library_host = ft.Column(
+            [ft.Text("Waiting for first poll…", size=12, color=PALETTE["muted"])],
+            spacing=8,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
         charts_subtitle_text = ft.Text("", size=12, color=PALETTE["muted"])
         chart_window_s = {"value": 300.0}
         nav_state = {"index": 0}
@@ -1264,7 +1269,6 @@ def run_gui(
                 update_status_line,
                 unload_status,
                 poll_footer,
-                action_row,
             ],
             expand=True,
             scroll=ft.ScrollMode.AUTO,
@@ -1282,12 +1286,14 @@ def run_gui(
                     spacing=8,
                 ),
                 charts_host,
-                action_row,
             ],
             expand=True,
             spacing=10,
         )
-        library_page = ft.Column([library_host, action_row], expand=True, spacing=10)
+        # action_row lives in the shared chrome (_page_column), not in each page —
+        # Flet controls can only have one parent, so sharing it across page Columns
+        # left Library/Charts blank until a host switch rebuilt the tree.
+        library_page = ft.Column([library_host], expand=True, spacing=10)
         discover_search_row = ft.Row(
             [
                 search_field,
@@ -1353,7 +1359,7 @@ def run_gui(
         )
         def _page_column(page_body: ft.Control) -> ft.Column:
             return ft.Column(
-                [current_server, host_banner, page_body],
+                [current_server, host_banner, page_body, action_row],
                 expand=True,
                 spacing=10,
             )
