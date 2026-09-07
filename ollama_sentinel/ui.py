@@ -43,7 +43,12 @@ from ollama_sentinel.unload import unload_models
 from ollama_sentinel.show import ShowCache
 from ollama_sentinel.smi import query_gpus
 from ollama_sentinel.state import load_state, save_state
-from ollama_sentinel.telemetry import format_poll_age, is_stale, polled_at_iso
+from ollama_sentinel.telemetry import (
+    format_freshness_line,
+    format_poll_age,
+    is_stale,
+    polled_at_iso,
+)
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
 from ollama_sentinel.ui_charts import charts_subtitle, metrics_charts_panel
@@ -54,6 +59,7 @@ from ollama_sentinel.ui_widgets import (
     activity_card,
     alarm_banner,
     discover_result_tile,
+    freshness_banner,
     gpu_table,
     library_table,
     loaded_models_table,
@@ -99,7 +105,11 @@ def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) ->
     """Drop cached snap / poll age so the footer cannot claim the previous host."""
     last_snap.clear()
     poll_state["polled_ts"] = None
+    poll_state["live_ts"] = None
     poll_state["stale"] = False
+    poll_state["alarms"] = []
+    poll_state["reachable"] = True
+    poll_state["optional"] = False
 
 
 def show_local_process_panels(local_gpu: bool) -> bool:
@@ -325,8 +335,15 @@ def run_gui(
         update_status_line = ft.Text("", size=12, color=PALETTE["muted"])
         show_cache = ShowCache(ttl=cfg.show_cache_ttl) if cfg.advisor else None
         last_advisories: list = []
+        freshness_host = ft.Container()
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
-        poll_state: dict[str, Any] = {"polled_ts": None, "stale": False, "reachable": True}
+        poll_state: dict[str, Any] = {
+            "polled_ts": None,
+            "live_ts": None,
+            "stale": False,
+            "reachable": True,
+            "optional": False,
+        }
         # Guards against a slow poll for the previous server landing after the
         # user has already switched away, which used to leave the panels showing
         # one server's data under another server's name.
@@ -335,6 +352,10 @@ def run_gui(
         charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
         charts_subtitle_text = ft.Text("", size=12, color=PALETTE["muted"])
         chart_window_s = {"value": 300.0}
+        nav_state = {"index": 0}
+        live_tick_n = {"n": 0}
+        # nvidia-smi is ~70ms here — safe to sample between full Ollama polls.
+        LIVE_GPU_INTERVAL_S = 2
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
         discover_state: dict[str, Any] = {
             "sort": "trendingScore",
@@ -363,33 +384,76 @@ def run_gui(
                     return s
             return servers[0]
 
-        def update_charts() -> None:
+        def update_charts(*, push: bool = False) -> None:
             if metrics_store is None:
                 charts_subtitle_text.value = "Metrics disabled (set METRICS=1 in .env)"
                 charts_host.controls = [
                     ft.Text("Charts unavailable while metrics are off.", size=12, color=PALETTE["muted"]),
                 ]
-                return
-            srv = get_server_cfg()
-            charts_subtitle_text.value = charts_subtitle(
-                metrics_store,
-                window_s=chart_window_s["value"],
-                server=srv.name,
-                poll_interval=cfg.poll_interval,
-            )
-            charts_host.controls = [
-                metrics_charts_panel(
+            else:
+                srv = get_server_cfg()
+                charts_subtitle_text.value = charts_subtitle(
                     metrics_store,
                     window_s=chart_window_s["value"],
                     server=srv.name,
-                ),
-            ]
+                    poll_interval=LIVE_GPU_INTERVAL_S,
+                )
+                charts_host.controls = [
+                    metrics_charts_panel(
+                        metrics_store,
+                        window_s=chart_window_s["value"],
+                        server=srv.name,
+                    ),
+                ]
+            if push:
+                try:
+                    charts_subtitle_text.update()
+                    charts_host.update()
+                except Exception:
+                    # Not mounted (another tab) — next visit rebuilds from store.
+                    pass
+
+        def ingest_live_gpu_metrics() -> bool:
+            """Sample nvidia-smi into the metrics store between full Ollama polls."""
+            if metrics_store is None:
+                return False
+            srv = get_server_cfg()
+            if not srv.local_gpu:
+                return False
+            if not poll_state.get("reachable", True):
+                return False
+            try:
+                gpus = query_gpus(cfg.gpu_filter)
+            except Exception:
+                return False
+            if not gpus:
+                return False
+            now = time.time()
+            metrics_store.ingest_snapshot(
+                {
+                    "reachable": True,
+                    "server": srv.name,
+                    "polled_at_ts": now,
+                    "models": last_snap.get("models") or [],
+                    "gpus": gpus,
+                }
+            )
+            # Keep the Status GPU card in sync when that tab is visible.
+            if nav_state["index"] == 0:
+                gpu_host.controls.clear()
+                for gpu in gpus:
+                    gpu_host.controls.append(gpu_table(gpu))
+                try:
+                    gpu_host.update()
+                except Exception:
+                    pass
+            return True
 
         def on_chart_window(e) -> None:
             sel = e.control.selected
             if sel:
                 chart_window_s["value"] = float(sel[0])
-            update_charts()
+            update_charts(push=True)
             page.update()
 
         chart_window_pick = ft.SegmentedButton(
@@ -403,21 +467,74 @@ def run_gui(
         )
 
         def update_poll_footer(now: float | None = None) -> None:
-            polled_ts = poll_state.get("polled_ts")
-            if polled_ts is None:
-                return
             tick = now if now is not None else time.time()
-            stale_poll = bool(
-                poll_state.get("stale")
-                or is_stale(polled_ts, cfg.poll_interval, tick)
+            level, label = format_freshness_line(
+                poll_state.get("polled_ts"),
+                cfg.poll_interval,
+                tick,
+                reachable=bool(poll_state.get("reachable", True)),
+                live_at=poll_state.get("live_ts"),
             )
-            footer = format_poll_age(polled_ts, tick)
-            if stale_poll:
-                poll_footer.value = f"STALE · {footer}"
-                poll_footer.color = PALETTE["stale"]
+            if poll_state.get("optional") and not poll_state.get("reachable", True):
+                label = label.replace("Unreachable", "Offline (optional)", 1)
+                if level == "stale":
+                    level = "aging"
+            freshness_host.content = freshness_banner(
+                level=level,
+                label=label,
+                interval_s=cfg.poll_interval,
+            )
+            # Keep a quiet footer line for scroll-to-bottom context.
+            if level == "stale":
+                poll_footer.value = label
+                poll_footer.color = PALETTE["stale"] if poll_state.get("reachable", True) else (
+                    PALETTE["warn"] if poll_state.get("optional") else PALETTE["alarm"]
+                )
+            elif level == "aging":
+                poll_footer.value = label
+                poll_footer.color = PALETTE["warn"]
             else:
-                poll_footer.value = f"Updated {footer}"
+                poll_footer.value = label
                 poll_footer.color = PALETTE["muted"]
+
+        def paint_activity(act) -> None:
+            card = activity_card(act)
+            activity_host.content = card
+            poll_state["live_ts"] = time.time()
+
+        def rebuild_live_activity() -> bool:
+            """Cheap status refresh: re-read server.log / peers without a full poll."""
+            srv = get_server_cfg()
+            if not srv.local_gpu:
+                return False
+            if not poll_state.get("reachable", True):
+                return False
+            proc_rows = None
+            if proc_collector:
+                proc_rows = (proc_collector.get_snapshot() or {}).get("rows")
+            act = build_server_activity(
+                proc_rows=proc_rows,
+                models=last_snap.get("models"),
+                peer_names=build_peer_name_map(load_client_config(cfg.client_config)),
+                listen_port=listen_port_from_url(srv.url),
+            )
+            paint_activity(act)
+            icon = tray_icon.get("icon")
+            if icon is not None:
+                from ollama_sentinel.tray import update_tray
+
+                try:
+                    update_tray(
+                        icon,
+                        reachable=True,
+                        alarms=poll_state.get("alarms") or [],
+                        phase=act.phase,
+                        summary=act.summary,
+                        server=srv.name,
+                    )
+                except Exception:
+                    pass
+            return True
 
         def _close_dialog(dlg: ft.AlertDialog) -> None:
             dlg.open = False
@@ -611,19 +728,9 @@ def run_gui(
             poll_state["polled_ts"] = polled_ts
             poll_state["stale"] = bool(snap.get("stale"))
             poll_state["reachable"] = reachable
-            if not reachable:
-                poll_footer.value = (
-                    f"Offline (optional) · {format_poll_age(polled_ts, now)}"
-                    if snap.get("optional")
-                    else (
-                        f"Unreachable · {format_poll_age(polled_ts, now)}"
-                        if polled_ts is not None
-                        else "Unreachable"
-                    )
-                )
-                poll_footer.color = PALETTE["warn"] if snap.get("optional") else PALETTE["alarm"]
-            else:
-                update_poll_footer(now)
+            poll_state["optional"] = bool(snap.get("optional"))
+            poll_state["alarms"] = list(active)
+            update_poll_footer(now)
 
             alarm_host.content = alarm_banner(
                 reachable,
@@ -658,9 +765,9 @@ def run_gui(
                     peer_names=build_peer_name_map(load_client_config(cfg.client_config)),
                     listen_port=listen_port_from_url(srv.url),
                 )
-                card = activity_card(act)
-                if card is not None:
-                    activity_host.content = card
+                paint_activity(act)
+            else:
+                poll_state["live_ts"] = None
 
             icon = tray_icon.get("icon")
             if icon is not None:
@@ -763,7 +870,7 @@ def run_gui(
             else:
                 gaming_status.value = ""
 
-            update_charts()
+            update_charts(push=True)
             page.update()
 
             # Doctor after first paint (local host only).
@@ -1118,6 +1225,7 @@ def run_gui(
 
         status_page = ft.Column(
             [
+                freshness_host,
                 alarm_host,
                 gpu_host,
                 models_host,
@@ -1275,6 +1383,13 @@ def run_gui(
             gpu_host.controls = []
             proc_vram_host.controls = []
             activity_host.content = None
+            freshness_host.content = freshness_banner(
+                level="unknown",
+                label=caption,
+                interval_s=cfg.poll_interval,
+            )
+            poll_state["live_ts"] = None
+            poll_state["alarms"] = []
 
             library_host.controls = [
                 ft.Text(caption, size=12, color=PALETTE["muted"])
@@ -1314,6 +1429,7 @@ def run_gui(
                 gpu_host.update()
                 proc_vram_host.update()
                 activity_host.update()
+                freshness_host.update()
                 library_host.update()
                 charts_host.update()
                 charts_subtitle_text.update()
@@ -1328,8 +1444,13 @@ def run_gui(
 
         def on_nav(e):
             idx = int(e.control.selected_index)
+            nav_state["index"] = idx
             page_body = pages[idx]
             content_area.content = _page_column(page_body)
+            # Charts were often mutated while unmounted; rebuild so the tab
+            # never opens on a stale Canvas from the last visit.
+            if idx == 1:
+                update_charts(push=True)
             page.update()
 
         nav.on_change = on_nav
@@ -1351,16 +1472,31 @@ def run_gui(
         def footer_tick_loop():
             while True:
                 time.sleep(1)
+                live_tick_n["n"] += 1
                 try:
-                    if poll_state.get("polled_ts") is None:
-                        continue
-                    if not poll_state.get("reachable", True):
-                        polled_ts = poll_state["polled_ts"]
-                        poll_footer.value = f"Unreachable · {format_poll_age(polled_ts, time.time())}"
-                        poll_footer.color = PALETTE["alarm"]
-                    else:
-                        update_poll_footer()
-                    poll_footer.update()
+                    # Activity from logs is cheap; refresh it every second so
+                    # n_gen / phase track generation without waiting for the
+                    # full 5s Ollama poll.
+                    try:
+                        rebuild_live_activity()
+                    except Exception:
+                        pass
+                    # GPU series for Charts: sample between full polls, then
+                    # push a Canvas rebuild (page.update alone often left charts
+                    # frozen while the Status tab looked live).
+                    if live_tick_n["n"] % LIVE_GPU_INTERVAL_S == 0:
+                        try:
+                            if ingest_live_gpu_metrics():
+                                update_charts(push=True)
+                        except Exception:
+                            pass
+                    update_poll_footer()
+                    try:
+                        freshness_host.update()
+                        activity_host.update()
+                        poll_footer.update()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 

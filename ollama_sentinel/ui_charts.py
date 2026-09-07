@@ -65,7 +65,7 @@ def charts_subtitle(
     """User-facing context for the Charts tab — not implementation detail."""
     window = WINDOW_LABELS.get(int(window_s), f"{int(window_s)} seconds")
     target = server or "this server"
-    refresh = f"updates every {int(poll_interval)}s"
+    refresh = f"updates every {int(poll_interval)}s" if poll_interval >= 1 else "live updates"
 
     series = store.series("mem_used_pct", window_s=window_s, server=server)
     if len(series) < 2:

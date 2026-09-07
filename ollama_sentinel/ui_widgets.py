@@ -10,7 +10,12 @@ from ollama_sentinel.alarms import format_expires, gpu_pct
 from ollama_sentinel.activity import ServerActivity, model_detail_line
 from ollama_sentinel.catalog import format_count, summarize_list_item
 from ollama_sentinel.inventory import inventory_detail_line
-from ollama_sentinel.telemetry import format_bytes_gb, format_field, format_throttle
+from ollama_sentinel.telemetry import (
+    format_bytes_gb,
+    format_field,
+    format_throttle,
+    gpu_metric_rows,
+)
 
 PALETTE = {
     "ok": ft.Colors.GREEN_400,
@@ -18,8 +23,94 @@ PALETTE = {
     "alarm": ft.Colors.RED_400,
     "muted": ft.Colors.GREY_500,
     "stale": ft.Colors.ORANGE_300,
+    "busy": ft.Colors.CYAN_300,
     "surface": ft.Colors.SURFACE_CONTAINER_HIGHEST,
 }
+
+_METRIC_ICONS = {
+    "memory": ft.Icons.MEMORY,
+    "thermostat": ft.Icons.THERMOSTAT,
+    "mode_fan": ft.Icons.AIR,
+    "speed": ft.Icons.SPEED,
+    "swap_vert": ft.Icons.SWAP_VERT,
+    "bolt": ft.Icons.BOLT,
+    "tune": ft.Icons.TUNE,
+    "schedule": ft.Icons.SCHEDULE,
+}
+
+
+def severity_color(severity: str | None) -> str:
+    if severity == "busy":
+        return PALETTE["busy"]
+    if severity in PALETTE:
+        return PALETTE[severity]
+    return ft.Colors.WHITE70
+
+
+def _metric_table(
+    rows: list[tuple[str, str] | dict[str, Any]],
+    *,
+    footer: str | None = None,
+) -> ft.DataTable:
+    data_rows: list[ft.DataRow] = []
+    for row in rows:
+        if isinstance(row, dict):
+            label = str(row.get("label") or "")
+            value = str(row.get("value") or "—")
+            sev = row.get("severity")
+            icon_key = row.get("icon")
+            color = severity_color(sev)
+            icon = _METRIC_ICONS.get(str(icon_key)) if icon_key else None
+            if icon is not None:
+                label_ctrl: ft.Control = ft.Row(
+                    [
+                        ft.Icon(icon, size=16, color=color),
+                        ft.Text(label, size=12, color=PALETTE["muted"]),
+                    ],
+                    spacing=6,
+                    tight=True,
+                )
+            else:
+                label_ctrl = ft.Text(label, size=12, color=PALETTE["muted"])
+            weight = ft.FontWeight.W_600 if sev in ("warn", "alarm", "busy") else None
+            data_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(label_ctrl),
+                        ft.DataCell(ft.Text(value, size=12, color=color, weight=weight)),
+                    ]
+                )
+            )
+        else:
+            label, value = row
+            data_rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(label, size=12, color=PALETTE["muted"])),
+                        ft.DataCell(ft.Text(value, size=12)),
+                    ]
+                )
+            )
+    if footer:
+        data_rows.append(
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text("Note", size=12, color=PALETTE["stale"])),
+                    ft.DataCell(ft.Text(footer, size=12, color=PALETTE["stale"])),
+                ]
+            )
+        )
+    return ft.DataTable(
+        columns=[
+            ft.DataColumn(ft.Text("Metric", size=12, weight=ft.FontWeight.BOLD)),
+            ft.DataColumn(ft.Text("Value", size=12, weight=ft.FontWeight.BOLD)),
+        ],
+        rows=data_rows,
+        heading_row_height=32,
+        data_row_min_height=28,
+        column_spacing=16,
+        horizontal_margin=8,
+    )
 
 
 def alarm_state(reachable: bool, active: list[dict[str, Any]]) -> tuple[str, str, str | None]:
@@ -74,38 +165,6 @@ def advisory_color(findings: list[Any]) -> str | None:
     return None
 
 
-def _metric_table(rows: list[tuple[str, str]], *, footer: str | None = None) -> ft.DataTable:
-    data_rows = [
-        ft.DataRow(
-            cells=[
-                ft.DataCell(ft.Text(label, size=12, color=PALETTE["muted"])),
-                ft.DataCell(ft.Text(value, size=12)),
-            ]
-        )
-        for label, value in rows
-    ]
-    if footer:
-        data_rows.append(
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text("Note", size=12, color=PALETTE["stale"])),
-                    ft.DataCell(ft.Text(footer, size=12, color=PALETTE["stale"])),
-                ]
-            )
-        )
-    return ft.DataTable(
-        columns=[
-            ft.DataColumn(ft.Text("Metric", size=12, weight=ft.FontWeight.BOLD)),
-            ft.DataColumn(ft.Text("Value", size=12, weight=ft.FontWeight.BOLD)),
-        ],
-        rows=data_rows,
-        heading_row_height=32,
-        data_row_min_height=28,
-        column_spacing=16,
-        horizontal_margin=8,
-    )
-
-
 def _cell(text: str, *, color: str | None = None, weight: ft.FontWeight | None = None) -> ft.DataCell:
     return ft.DataCell(ft.Text(text, size=12, color=color, weight=weight))
 
@@ -131,6 +190,51 @@ def section_card(
             padding=12,
         ),
         elevation=1,
+    )
+
+
+def freshness_banner(
+    *,
+    level: str,
+    label: str,
+    interval_s: float | None = None,
+) -> ft.Container:
+    """Top-of-status strip: how old the last full poll is (ticks every second)."""
+    bg = {
+        "ok": ft.Colors.GREEN_900,
+        "aging": ft.Colors.ORANGE_900,
+        "stale": ft.Colors.RED_900,
+        "unknown": ft.Colors.BLUE_GREY_900,
+    }.get(level, ft.Colors.BLUE_GREY_900)
+    fg = {
+        "ok": PALETTE["ok"],
+        "aging": PALETTE["warn"],
+        "stale": PALETTE["alarm"],
+        "unknown": PALETTE["muted"],
+    }.get(level, PALETTE["muted"])
+    badge = {
+        "ok": "FRESH",
+        "aging": "LATE",
+        "stale": "STALE",
+        "unknown": "…",
+    }.get(level, "…")
+    hint = f"full poll every {interval_s:g}s" if interval_s else None
+    row: list[ft.Control] = [
+        ft.Container(
+            content=ft.Text(badge, size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
+            bgcolor=fg,
+            padding=ft.padding.symmetric(horizontal=8, vertical=2),
+            border_radius=4,
+        ),
+        ft.Text(label, size=12, color=ft.Colors.WHITE70, expand=True),
+    ]
+    if hint:
+        row.append(ft.Text(hint, size=11, color=PALETTE["muted"]))
+    return ft.Container(
+        content=ft.Row(row, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        padding=10,
+        border_radius=8,
+        bgcolor=bg,
     )
 
 
@@ -174,24 +278,8 @@ def alarm_banner(
 
 def gpu_table(gpu: dict[str, Any]) -> ft.Control:
     name = gpu.get("name") or f"GPU {gpu.get('index', 0)}"
-    metrics: list[tuple[str, str]] = [
-        ("Used", format_bytes_gb(gpu.get("memory_used"))),
-        ("Free", f"{format_bytes_gb(gpu.get('memory_free'))} ({format_field(gpu.get('memory_free_pct'), '%')})"),
-        ("Total", format_bytes_gb(gpu.get("memory_total"))),
-        ("Reserved", format_bytes_gb(gpu.get("memory_reserved"))),
-        ("Temp", format_field(gpu.get("temperature"), "°C")),
-        ("Fan", format_field(gpu.get("fan_speed"), "%")),
-        ("GPU util", format_field(gpu.get("utilization"), "%")),
-        ("Mem util", format_field(gpu.get("memory_utilization"), "%")),
-        ("Power", f"{format_field(gpu.get('power_draw'), ' W')} / {format_field(gpu.get('power_limit'), ' W')}"),
-        ("Pstate", format_field(gpu.get("pstate"))),
-        (
-            "Clocks",
-            f"{format_field(gpu.get('clock_sm'), ' MHz')} / {format_field(gpu.get('clock_mem'), ' MHz')}",
-        ),
-    ]
     throttle = format_throttle(gpu)
-    return section_card(name, _metric_table(metrics, footer=throttle))
+    return section_card(name, _metric_table(gpu_metric_rows(gpu), footer=throttle))
 
 
 def _activity_client_label(req: dict[str, Any]) -> str:

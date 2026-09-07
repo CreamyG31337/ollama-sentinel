@@ -160,6 +160,65 @@ def format_poll_age(polled_at: float, now: float) -> str:
     return f"{dt.strftime('%H:%M:%S')} ({age}s ago)"
 
 
+def poll_age_seconds(polled_at: float | None, now: float) -> float | None:
+    if polled_at is None:
+        return None
+    return max(0.0, now - polled_at)
+
+
+def freshness_level(
+    polled_at: float | None,
+    interval: float,
+    now: float,
+) -> str:
+    """ok | aging | stale | unknown.
+
+    * ok — within one poll interval
+    * aging — past one interval but not yet the 3× STALE threshold (refresh late)
+    * stale — older than 3× interval (or never polled)
+    """
+    if polled_at is None:
+        return "unknown"
+    age = now - polled_at
+    if age > 3 * interval:
+        return "stale"
+    if age > interval:
+        return "aging"
+    return "ok"
+
+
+def format_freshness_line(
+    polled_at: float | None,
+    interval: float,
+    now: float,
+    *,
+    reachable: bool = True,
+    live_at: float | None = None,
+) -> tuple[str, str]:
+    """Return (level, human label) for the status freshness banner."""
+    if not reachable:
+        if polled_at is None:
+            return "stale", "Unreachable · no poll yet"
+        return "stale", f"Unreachable · last {format_poll_age(polled_at, now)}"
+
+    level = freshness_level(polled_at, interval, now)
+    if polled_at is None:
+        return "unknown", "Waiting for first poll…"
+
+    age_text = format_poll_age(polled_at, now)
+    if level == "stale":
+        label = f"STALE · last poll {age_text}"
+    elif level == "aging":
+        label = f"Late · last poll {age_text}"
+    else:
+        label = f"Live · polled {age_text}"
+
+    if live_at is not None:
+        live_age = max(0, int(now - live_at))
+        label += f" · activity {live_age}s ago"
+    return level, label
+
+
 def polled_at_iso(polled_at: float) -> str:
     return datetime.fromtimestamp(polled_at, tz=timezone.utc).isoformat()
 
@@ -168,6 +227,165 @@ def is_stale(polled_at: float | None, interval: float, now: float) -> bool:
     if polled_at is None:
         return True
     return (now - polled_at) > (3 * interval)
+
+
+def metric_severity(kind: str, value: float | None, *, ref: float | None = None) -> str:
+    """ok | warn | alarm | muted | busy for a GPU telemetry field.
+
+    ``ref`` is the comparison ceiling when needed (power limit, VRAM total).
+    Thresholds are tuned for a gaming/datacenter NVIDIA card under LLM load,
+    not a silent desktop idle.
+    """
+    if value is None:
+        return "muted"
+    if kind == "temperature":
+        if value >= 83:
+            return "alarm"
+        if value >= 75:
+            return "warn"
+        if value >= 60:
+            return "busy"
+        return "ok"
+    if kind == "utilization":
+        if value >= 90:
+            return "busy"
+        if value >= 5:
+            return "ok"
+        return "muted"
+    if kind == "fan":
+        if value >= 80:
+            return "warn"
+        if value >= 40:
+            return "ok"
+        return "muted"
+    if kind == "power":
+        if ref and ref > 0:
+            pct = 100.0 * value / ref
+            if pct >= 95:
+                return "alarm"
+            if pct >= 80:
+                return "warn"
+            if pct >= 20:
+                return "ok"
+            return "muted"
+        return "ok" if value > 0 else "muted"
+    if kind == "vram_used_pct":
+        if value >= 95:
+            return "alarm"
+        if value >= 85:
+            return "warn"
+        if value >= 50:
+            return "ok"
+        return "muted"
+    if kind == "vram_free_pct":
+        if value <= 5:
+            return "alarm"
+        if value <= 15:
+            return "warn"
+        return "ok"
+    return "ok"
+
+
+def gpu_metric_rows(gpu: dict[str, Any]) -> list[dict[str, Any]]:
+    """Structured GPU rows for the status table (icon key, label, value, severity)."""
+    used = gpu.get("memory_used")
+    total = gpu.get("memory_total")
+    free = gpu.get("memory_free")
+    free_pct = gpu.get("memory_free_pct")
+    used_pct = None
+    if used is not None and total:
+        used_pct = 100.0 * float(used) / float(total)
+
+    power_draw = gpu.get("power_draw")
+    power_limit = gpu.get("power_limit") or gpu.get("power_limit_enforced")
+    temp = gpu.get("temperature")
+    fan = gpu.get("fan_speed")
+    util = gpu.get("utilization")
+    mem_util = gpu.get("memory_utilization")
+
+    rows: list[dict[str, Any]] = [
+        {
+            "key": "vram_used",
+            "icon": "memory",
+            "label": "VRAM used",
+            "value": format_bytes_gb(used),
+            "severity": metric_severity("vram_used_pct", used_pct),
+        },
+        {
+            "key": "vram_free",
+            "icon": "memory",
+            "label": "VRAM free",
+            "value": f"{format_bytes_gb(free)} ({format_field(free_pct, '%')})",
+            "severity": metric_severity("vram_free_pct", free_pct),
+        },
+        {
+            "key": "vram_total",
+            "icon": "memory",
+            "label": "VRAM total",
+            "value": format_bytes_gb(total),
+            "severity": "muted",
+        },
+        {
+            "key": "vram_reserved",
+            "icon": "memory",
+            "label": "Reserved",
+            "value": format_bytes_gb(gpu.get("memory_reserved")),
+            "severity": "muted",
+        },
+        {
+            "key": "temperature",
+            "icon": "thermostat",
+            "label": "Temp",
+            "value": format_field(temp, "°C"),
+            "severity": metric_severity("temperature", temp),
+        },
+        {
+            "key": "fan",
+            "icon": "mode_fan",
+            "label": "Fan",
+            "value": format_field(fan, "%"),
+            "severity": metric_severity("fan", fan),
+        },
+        {
+            "key": "gpu_util",
+            "icon": "speed",
+            "label": "GPU util",
+            "value": format_field(util, "%"),
+            "severity": metric_severity("utilization", util),
+        },
+        {
+            "key": "mem_util",
+            "icon": "swap_vert",
+            "label": "Mem util",
+            "value": format_field(mem_util, "%"),
+            "severity": metric_severity("utilization", mem_util),
+        },
+        {
+            "key": "power",
+            "icon": "bolt",
+            "label": "Power",
+            "value": f"{format_field(power_draw, ' W')} / {format_field(power_limit, ' W')}",
+            "severity": metric_severity("power", power_draw, ref=power_limit),
+        },
+        {
+            "key": "pstate",
+            "icon": "tune",
+            "label": "Pstate",
+            "value": format_field(gpu.get("pstate")),
+            "severity": "muted",
+        },
+        {
+            "key": "clocks",
+            "icon": "schedule",
+            "label": "Clocks",
+            "value": (
+                f"{format_field(gpu.get('clock_sm'), ' MHz')} / "
+                f"{format_field(gpu.get('clock_mem'), ' MHz')}"
+            ),
+            "severity": "muted",
+        },
+    ]
+    return rows
 
 
 def format_throttle(gpu: dict[str, Any]) -> str | None:
