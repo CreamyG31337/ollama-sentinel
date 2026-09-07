@@ -137,22 +137,30 @@ def fit_label(row: dict[str, Any]) -> tuple[str, str | None]:
     return "—", None
 
 
+def _advisory_short(finding: Any, *, max_len: int = 48) -> str:
+    """Compact text for a table cell — prefer the message over an opaque id token."""
+    msg = (getattr(finding, "message", "") or "").strip()
+    if msg.startswith("["):
+        close = msg.find("]")
+        if close != -1:
+            msg = msg[close + 1 :].strip()
+    if msg:
+        return msg if len(msg) <= max_len else msg[: max_len - 1] + "…"
+    sev = getattr(finding, "severity", "info")
+    if sev == "unknown":
+        return "no data"
+    fid = getattr(finding, "id", "") or ""
+    return fid.rsplit(":", 1)[-1] if fid else getattr(finding, "category", "?")
+
+
 def advisory_summary(findings: list[Any]) -> str:
     """One-line advisory hint for a library row."""
     if not findings:
         return "—"
-    parts: list[str] = []
-    for f in findings[:2]:
-        sev = getattr(f, "severity", "info")
-        fid = getattr(f, "id", "")
-        token = fid.rsplit(":", 1)[-1] if fid else getattr(f, "category", "?")
-        if sev == "warn":
-            parts.append(token)
-        elif sev == "unknown":
-            parts.append("no data")
+    parts = [_advisory_short(f) for f in findings[:2]]
     if len(findings) > 2:
         parts.append(f"+{len(findings) - 2}")
-    return ", ".join(parts) if parts else "info"
+    return ", ".join(parts)
 
 
 def advisory_color(findings: list[Any]) -> str | None:
@@ -163,6 +171,81 @@ def advisory_color(findings: list[Any]) -> str | None:
     if findings:
         return PALETTE["muted"]
     return None
+
+
+_ADVISOR_PANEL_LIMIT = 8
+_SEVERITY_ORDER = {"warn": 0, "unknown": 1, "info": 2}
+
+
+def advisor_headline(findings: list[Any]) -> str:
+    """Status strip title: count of warnings, else notes."""
+    if not findings:
+        return ""
+    warns = sum(1 for f in findings if getattr(f, "severity", "") == "warn")
+    if warns:
+        return f"Advisor: {warns} warning{'s' if warns != 1 else ''}"
+    n = len(findings)
+    return f"Advisor: {n} note{'s' if n != 1 else ''}"
+
+
+def advisor_detail_lines(
+    findings: list[Any], *, limit: int = _ADVISOR_PANEL_LIMIT
+) -> list[tuple[str, str]]:
+    """Ordered (severity, text) rows for the Status advisor panel."""
+    if not findings:
+        return []
+    ranked = sorted(
+        findings,
+        key=lambda f: (
+            _SEVERITY_ORDER.get(getattr(f, "severity", "info"), 9),
+            getattr(f, "id", "") or "",
+        ),
+    )
+    rows: list[tuple[str, str]] = []
+    for f in ranked[:limit]:
+        sev = getattr(f, "severity", "info") or "info"
+        msg = (getattr(f, "message", "") or "").strip() or (
+            getattr(f, "id", "") or "?"
+        )
+        rows.append((sev, msg))
+        remedy = getattr(f, "remedy", None)
+        if remedy and sev == "warn":
+            rows.append(("muted", f"→ {remedy}"))
+    rest = len(ranked) - limit
+    if rest > 0:
+        rows.append(("muted", f"…and {rest} more"))
+    return rows
+
+
+def advisor_panel(findings: list[Any]) -> ft.Control | None:
+    """Status-page card that lists advisory messages — not just a count."""
+    if not findings:
+        return None
+    warns = any(getattr(f, "severity", "") == "warn" for f in findings)
+    title_color = PALETTE["warn"] if warns else PALETTE["muted"]
+    lines: list[ft.Control] = [
+        ft.Text(
+            advisor_headline(findings),
+            size=13,
+            weight=ft.FontWeight.W_500,
+            color=title_color,
+        ),
+    ]
+    for sev, text in advisor_detail_lines(findings):
+        if sev == "warn":
+            color = PALETTE["warn"]
+        elif sev == "unknown":
+            color = PALETTE["stale"]
+        else:
+            color = PALETTE["muted"]
+        prefix = "• " if sev != "muted" else ""
+        lines.append(ft.Text(f"{prefix}{text}", size=12 if sev != "muted" else 11, color=color))
+    return ft.Container(
+        content=ft.Column(lines, spacing=4),
+        padding=10,
+        border_radius=8,
+        bgcolor=PALETTE["surface"],
+    )
 
 
 def _cell(text: str, *, color: str | None = None, weight: ft.FontWeight | None = None) -> ft.DataCell:
@@ -223,7 +306,7 @@ def freshness_banner(
         ft.Container(
             content=ft.Text(badge, size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE),
             bgcolor=fg,
-            padding=ft.padding.symmetric(horizontal=8, vertical=2),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
             border_radius=4,
         ),
         ft.Text(label, size=12, color=ft.Colors.WHITE70, expand=True),

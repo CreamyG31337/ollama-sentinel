@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import struct
+from io import BytesIO
+
+from PIL import Image
+
 from ollama_sentinel.tray import (
+    ICO_SIZES,
     STATUS_COLORS,
+    find_icon_asset,
     format_tray_tooltip,
     make_status_icon,
     recolor_brand,
+    render_brand_icon,
     resolve_tray_status,
     set_tray_color,
 )
@@ -77,8 +85,6 @@ def test_make_status_icon_sizes_and_colors():
 
 
 def test_recolor_preserves_alpha_and_non_green():
-    from PIL import Image
-
     img = Image.new("RGBA", (4, 4), (32, 34, 38, 255))
     img.putpixel((1, 1), (64, 200, 120, 200))
     img.putpixel((2, 2), (255, 0, 0, 100))
@@ -100,3 +106,30 @@ def test_set_tray_color_compat_wrapper():
     set_tray_color(fake, [{"type": "spill", "message": "spill"}])
     assert fake._sentinel_status == "warn"
     assert "Warn" in fake.title
+
+
+def test_render_brand_icon_is_antialiased():
+    img = render_brand_icon(64)
+    assert img.size == (64, 64)
+    fringe = sum(1 for _r, _g, _b, a in img.getdata() if 1 <= a <= 200)
+    assert fringe > 50
+
+
+def test_brand_ico_has_antialiased_sizes():
+    path = find_icon_asset()
+    assert path is not None
+    data = path.read_bytes()
+    _reserved, _typ, count = struct.unpack_from("<HHH", data, 0)
+    assert count >= len(ICO_SIZES)
+    offset = 6
+    seen: set[int] = set()
+    for _ in range(count):
+        w, _h, _c, _res, _planes, _bpp, size, off = struct.unpack_from("<BBBBHHII", data, offset)
+        w = 256 if w == 0 else w
+        seen.add(w)
+        frame = Image.open(BytesIO(data[off : off + size])).convert("RGBA")
+        fringe = sum(1 for _r, _g, _b, a in frame.getdata() if 1 <= a <= 200)
+        # Posterized frames have zero fringe; every size should soft-edge.
+        assert fringe > 0, f"{w}x{w} lacks antialiasing"
+        offset += 16
+    assert set(ICO_SIZES) <= seen

@@ -22,6 +22,14 @@ import pystray
 
 # Brand green in the ICO (~#40C878). Recolor pixels near this hue.
 _BRAND_RGB = (64, 200, 120)
+_DARK_RGB = (32, 34, 38)
+
+# Concentric radii as fractions of the outer filled radius (measured from the
+# original mark). Drawn oversized then LANCZOS-downscaled so every ICO size
+# gets real antialiasing — the checked-in 256px frame used to be posterized.
+_PUPIL_R = 11 / 60
+_INNER_GREEN_R = 28 / 60
+_DARK_BAND_R = 52 / 60
 
 STATUS_COLORS: dict[str, tuple[int, int, int]] = {
     "ok": _BRAND_RGB,
@@ -56,19 +64,54 @@ def find_icon_asset() -> Path | None:
     return None
 
 
-def _fallback_base(size: int = 64) -> Image.Image:
-    """Simple O-ring if the ICO is missing (tests / odd installs)."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+def render_brand_icon(size: int, *, supersample: int = 8) -> Image.Image:
+    """Paint the concentric sentinel mark at ``size`` with supersampled edges."""
+    scale = max(1, supersample)
+    canvas = size * scale
+    img = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad = size // 10
-    draw.ellipse((pad, pad, size - pad, size - pad), outline=_BRAND_RGB + (255,), width=max(3, size // 10))
-    inner = size // 3
-    draw.ellipse(
-        (inner, inner, size - inner, size - inner),
-        outline=_BRAND_RGB + (255,),
-        width=max(2, size // 14),
+    # ~1.5 final-px margin so the outer rim keeps an AA fringe instead of clipping.
+    margin = max(scale, int(round(1.5 * scale)))
+    outer_r = (canvas / 2) - margin
+    cx = cy = canvas / 2
+    brand = _BRAND_RGB + (255,)
+    dark = _DARK_RGB + (255,)
+
+    def circle(frac: float, fill: tuple[int, int, int, int]) -> None:
+        r = outer_r * frac
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fill)
+
+    circle(1.0, brand)
+    circle(_DARK_BAND_R, dark)
+    circle(_INNER_GREEN_R, brand)
+    circle(_PUPIL_R, dark)
+    if scale == 1:
+        return img
+    return img.resize((size, size), Image.Resampling.LANCZOS)
+
+
+# Standard Windows multi-res set (plus 20/40 for 125%/250% DPI taskbars).
+ICO_SIZES: tuple[int, ...] = (16, 20, 24, 32, 40, 48, 64, 128, 256)
+
+
+def write_brand_ico(path: Path | None = None) -> Path:
+    """Rewrite ``assets/ollama-sentinel.ico`` with antialiased frames at each size."""
+    dest = path or (Path(__file__).resolve().parent.parent / "assets" / "ollama-sentinel.ico")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    frames = [render_brand_icon(s) for s in ICO_SIZES]
+    frames[-1].save(
+        dest,
+        format="ICO",
+        sizes=[(s, s) for s in ICO_SIZES],
+        append_images=frames[:-1],
     )
-    return img
+    _load_base_icon.cache_clear()
+    return dest
+
+
+def _fallback_base(size: int = 64) -> Image.Image:
+    """Same mark as the ICO when the file is missing (tests / odd installs)."""
+    return render_brand_icon(size)
 
 
 @lru_cache(maxsize=1)

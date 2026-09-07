@@ -51,12 +51,14 @@ from ollama_sentinel.telemetry import (
 )
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
+from ollama_sentinel.tray import find_icon_asset
 from ollama_sentinel.ui_charts import charts_subtitle, build_live_charts_panel
 from ollama_sentinel.settings import apply_to_config, effective, load_settings, set_setting
 from ollama_sentinel.ui_widgets import (
     PALETTE,
     settings_panel,
     activity_card,
+    advisor_panel,
     alarm_banner,
     discover_result_tile,
     freshness_banner,
@@ -145,6 +147,10 @@ def run_gui(
         page.window.width = 960
         page.window.height = 640
         page.padding = 12
+        # Windows taskbar / title-bar icon (Flet's default is the fishy logo).
+        icon_path = find_icon_asset()
+        if icon_path is not None:
+            page.window.icon = str(icon_path.resolve())
 
         async def show_window_async() -> None:
             page.window.visible = True
@@ -333,7 +339,7 @@ def run_gui(
         proc_vram_host = ft.Column(spacing=8)
         gaming_status = ft.Text("", size=12, color=PALETTE["muted"])
         doctor_status = ft.Text("", size=12, color=PALETTE["muted"])
-        advisor_status = ft.Text("", size=12, color=PALETTE["muted"])
+        advisor_status = ft.Container()
         update_status_line = ft.Text("", size=12, color=PALETTE["muted"])
         show_cache = ShowCache(ttl=cfg.show_cache_ttl) if cfg.advisor else None
         last_advisories: list = []
@@ -710,8 +716,7 @@ def run_gui(
 
             save_state(cfg.state_file, new_state)
 
-            advisor_status.value = ""
-            advisor_status.color = PALETTE["muted"]
+            advisor_status.content = None
 
             update_status_line.value = ""
             update_status_line.color = PALETTE["muted"]
@@ -1016,24 +1021,7 @@ def run_gui(
                             optional=bool(snap.get("optional")),
                         )
 
-                    warn_advisories = [
-                        f
-                        for f in last_advisories
-                        if f.severity == "warn" and f.category != "fit"
-                    ]
-                    if warn_advisories:
-                        advisor_status.value = (
-                            f"Advisor: {len(warn_advisories)} warning"
-                            f"{'s' if len(warn_advisories) != 1 else ''}"
-                            " — run ollama-sentinel advise"
-                        )
-                        advisor_status.color = PALETTE["warn"]
-                    elif last_advisories:
-                        advisor_status.value = (
-                            f"Advisor: {len(last_advisories)} note"
-                            f"{'s' if len(last_advisories) != 1 else ''}"
-                        )
-                        advisor_status.color = PALETTE["muted"]
+                    advisor_status.content = advisor_panel(last_advisories)
 
                     inv = build_inventory(snap)
                     if show_by_model:
@@ -1442,8 +1430,7 @@ def run_gui(
 
             poll_footer.value = caption
             poll_footer.color = PALETTE["muted"]
-            advisor_status.value = ""
-            advisor_status.color = PALETTE["muted"]
+            advisor_status.content = None
             doctor_status.value = ""
             doctor_status.color = PALETTE["muted"]
             gaming_status.value = ""
@@ -1547,4 +1534,6 @@ def run_gui(
         if instance_lock is not None:
             threading.Thread(target=show_request_loop, daemon=True).start()
 
-    ft.app(target=app)
+    icon_path = find_icon_asset()
+    assets_dir = str(icon_path.parent.resolve()) if icon_path is not None else None
+    ft.app(target=app, assets_dir=assets_dir)

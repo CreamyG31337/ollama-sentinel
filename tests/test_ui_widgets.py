@@ -2,7 +2,13 @@
 
 import unittest
 
-from ollama_sentinel.ui_widgets import advisory_summary, alarm_state, fit_label
+from ollama_sentinel.ui_widgets import (
+    advisory_summary,
+    advisor_detail_lines,
+    advisor_headline,
+    alarm_state,
+    fit_label,
+)
 
 
 class TestFitLabel(unittest.TestCase):
@@ -35,7 +41,7 @@ class TestAdvisorySummary(unittest.TestCase):
     def test_empty(self) -> None:
         self.assertEqual(advisory_summary([]), "—")
 
-    def test_warn_token(self) -> None:
+    def test_uses_message_not_id_token(self) -> None:
         from ollama_sentinel.advisor import AdvisorFinding
 
         findings = [
@@ -44,10 +50,73 @@ class TestAdvisorySummary(unittest.TestCase):
                 severity="warn",
                 confidence="medium",
                 id="fit:would_spill:big",
-                message="tight",
+                message="big may not fit in free VRAM",
             )
         ]
-        self.assertIn("big", advisory_summary(findings))
+        summary = advisory_summary(findings)
+        self.assertIn("may not fit", summary)
+        self.assertNotIn("would_spill", summary)
+
+    def test_strips_server_prefix(self) -> None:
+        from ollama_sentinel.advisor import AdvisorFinding
+
+        findings = [
+            AdvisorFinding(
+                category="fit",
+                severity="info",
+                confidence="high",
+                id="fit:gpu_unknown:local",
+                message="[local] No GPU telemetry — fit advisories skipped",
+            )
+        ]
+        self.assertTrue(advisory_summary(findings).startswith("No GPU"))
+
+
+class TestAdvisorPanelText(unittest.TestCase):
+    def test_headline_notes(self) -> None:
+        from ollama_sentinel.advisor import AdvisorFinding
+
+        findings = [
+            AdvisorFinding("info", "info", "high", "a", "one"),
+            AdvisorFinding("info", "info", "high", "b", "two"),
+        ]
+        self.assertEqual(advisor_headline(findings), "Advisor: 2 notes")
+
+    def test_headline_warnings(self) -> None:
+        from ollama_sentinel.advisor import AdvisorFinding
+
+        findings = [
+            AdvisorFinding("runtime", "warn", "high", "a", "spill"),
+            AdvisorFinding("info", "info", "high", "b", "note"),
+        ]
+        self.assertEqual(advisor_headline(findings), "Advisor: 1 warning")
+
+    def test_detail_lines_include_messages_and_remedy(self) -> None:
+        from ollama_sentinel.advisor import AdvisorFinding
+
+        findings = [
+            AdvisorFinding(
+                "info",
+                "info",
+                "high",
+                "info:mtp",
+                "MTP note about speculative decoding",
+            ),
+            AdvisorFinding(
+                "runtime",
+                "warn",
+                "high",
+                "runtime:spill",
+                "Model is spilling to system RAM",
+                remedy="Unload another model or use a smaller quant",
+            ),
+        ]
+        lines = advisor_detail_lines(findings)
+        texts = [t for _, t in lines]
+        self.assertEqual(lines[0][0], "warn")
+        self.assertIn("spilling", texts[0])
+        self.assertTrue(any(t.startswith("→ ") for t in texts))
+        self.assertTrue(any("MTP" in t for t in texts))
 
 
 class TestAlarmState(unittest.TestCase):
@@ -61,12 +130,13 @@ class TestAlarmState(unittest.TestCase):
         self.assertEqual(title, "Unreachable")
         self.assertEqual(key, "alarm")
 
-    def test_spill_warn(self) -> None:
-        active = [{"type": "spill", "message": "SPILL test"}]
-        title, body, key = alarm_state(True, active)
+    def test_alarms_body(self) -> None:
+        title, body, key = alarm_state(
+            True, [{"type": "spill", "message": "model spilled"}]
+        )
         self.assertEqual(title, "Alarms")
+        self.assertIn("spilled", body)
         self.assertEqual(key, "warn")
-        self.assertIn("SPILL", body)
 
     def test_paging_alarm(self) -> None:
         active = [{"type": "paging", "message": "PAGING test"}]
