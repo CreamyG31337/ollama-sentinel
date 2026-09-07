@@ -103,6 +103,38 @@ def host_dropdown_label(name: str, online: bool | None) -> str:
     return f"· …  ·  {name}"
 
 
+def host_status_color(online: bool | None) -> str:
+    if online is True:
+        return PALETTE["ok"]
+    if online is False:
+        return PALETTE["alarm"]
+    return PALETTE["muted"]
+
+
+def host_dropdown_option(name: str, online: bool | None) -> ft.dropdown.Option:
+    """Server menu row with a green/red online/offline marker."""
+    if online is True:
+        marker, status = "●", "online"
+    elif online is False:
+        marker, status = "○", "offline"
+    else:
+        marker, status = "·", "…"
+    color = host_status_color(online)
+    return ft.dropdown.Option(
+        key=name,
+        text=host_dropdown_label(name, online),
+        content=ft.Row(
+            [
+                ft.Text(marker, size=12, color=color),
+                ft.Text(status, size=12, color=color, weight=ft.FontWeight.W_600),
+                ft.Text(f"·  {name}", size=12),
+            ],
+            spacing=6,
+            tight=True,
+        ),
+    )
+
+
 def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) -> None:
     """Drop cached snap / poll age so the footer cannot claim the previous host."""
     last_snap.clear()
@@ -301,11 +333,7 @@ def run_gui(
         def rebuild_server_options() -> None:
             selected = current_server.value
             current_server.options = [
-                ft.dropdown.Option(
-                    key=s.name,
-                    text=host_dropdown_label(s.name, host_online.get(s.name)),
-                )
-                for s in servers
+                host_dropdown_option(s.name, host_online.get(s.name)) for s in servers
             ]
             if selected in host_online:
                 current_server.value = selected
@@ -314,11 +342,7 @@ def run_gui(
             label="Server",
             value=server_names[0] if server_names else None,
             options=[
-                ft.dropdown.Option(
-                    key=n,
-                    text=host_dropdown_label(n, host_online.get(n)),
-                )
-                for n in server_names
+                host_dropdown_option(n, host_online.get(n)) for n in server_names
             ],
             width=340,
         )

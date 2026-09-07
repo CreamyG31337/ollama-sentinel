@@ -8,9 +8,12 @@ from ollama_sentinel.ui import (
     clear_switch_state,
     host_context_line,
     host_dropdown_label,
+    host_dropdown_option,
+    host_status_color,
     loading_caption,
     show_local_process_panels,
 )
+from ollama_sentinel.ui_widgets import PALETTE
 
 
 class HostSwitchBlankTests(unittest.TestCase):
@@ -44,6 +47,21 @@ class HostSwitchBlankTests(unittest.TestCase):
             "○ offline  ·  ts-desktop-3070",
         )
         self.assertIn("…", host_dropdown_label("local", None))
+
+    def test_host_status_color_online_offline(self):
+        self.assertEqual(host_status_color(True), PALETTE["ok"])
+        self.assertEqual(host_status_color(False), PALETTE["alarm"])
+        self.assertEqual(host_status_color(None), PALETTE["muted"])
+
+    def test_host_dropdown_option_colors_status(self):
+        online = host_dropdown_option("ubuntu-rx6800", True)
+        offline = host_dropdown_option("ts-desktop-3070", False)
+        self.assertEqual(online.key, "ubuntu-rx6800")
+        self.assertEqual(offline.key, "ts-desktop-3070")
+        self.assertEqual(online.content.controls[1].value, "online")
+        self.assertEqual(online.content.controls[1].color, PALETTE["ok"])
+        self.assertEqual(offline.content.controls[1].value, "offline")
+        self.assertEqual(offline.content.controls[1].color, PALETTE["alarm"])
 
     def test_clear_switch_state_drops_snap_and_poll_age(self):
         last_snap = {"server": "cr-desktop-3090", "models": [{"name": "qwen"}]}
