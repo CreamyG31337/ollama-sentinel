@@ -406,12 +406,29 @@ def run_gui(
                     ),
                 ]
             if push:
+                # Prefer page.update() on the UI loop — Canvas often ignores
+                # charts_host.update() from a worker thread (range buttons work
+                # because they already run on the event loop).
                 try:
-                    charts_subtitle_text.update()
-                    charts_host.update()
+                    page.update()
                 except Exception:
-                    # Not mounted (another tab) — next visit rebuilds from store.
-                    pass
+                    try:
+                        charts_subtitle_text.update()
+                        charts_host.update()
+                    except Exception:
+                        pass
+
+        async def paint_charts_async() -> None:
+            """Rebuild chart Canvas on Flet's event loop (thread-safe)."""
+            update_charts(push=False)
+            page.update()
+
+        def request_charts_paint() -> None:
+            try:
+                page.run_task(paint_charts_async)
+            except Exception:
+                # Fallback if the page is tearing down.
+                update_charts(push=True)
 
         def ingest_live_gpu_metrics() -> bool:
             """Sample nvidia-smi into the metrics store between full Ollama polls."""
@@ -438,23 +455,31 @@ def run_gui(
                     "gpus": gpus,
                 }
             )
-            # Keep the Status GPU card in sync when that tab is visible.
-            if nav_state["index"] == 0:
+            poll_state["live_gpus"] = gpus
+            return True
+
+        async def paint_live_status_async() -> None:
+            """Push live GPU card + charts from the UI loop."""
+            gpus = poll_state.get("live_gpus")
+            if gpus is not None and nav_state["index"] == 0:
                 gpu_host.controls.clear()
                 for gpu in gpus:
                     gpu_host.controls.append(gpu_table(gpu))
-                try:
-                    gpu_host.update()
-                except Exception:
-                    pass
-            return True
+            update_charts(push=False)
+            update_poll_footer()
+            page.update()
+
+        def request_live_status_paint() -> None:
+            try:
+                page.run_task(paint_live_status_async)
+            except Exception:
+                update_charts(push=True)
 
         def on_chart_window(e) -> None:
             sel = e.control.selected
             if sel:
                 chart_window_s["value"] = float(sel[0])
             update_charts(push=True)
-            page.update()
 
         chart_window_pick = ft.SegmentedButton(
             selected=["300"],
@@ -870,7 +895,9 @@ def run_gui(
             else:
                 gaming_status.value = ""
 
-            update_charts(push=True)
+            # Canvas must be rebuilt on the Flet event loop; doing it only on
+            # this worker thread left Charts frozen until a range click.
+            request_charts_paint()
             page.update()
 
             # Doctor after first paint (local host only).
@@ -1447,10 +1474,10 @@ def run_gui(
             nav_state["index"] = idx
             page_body = pages[idx]
             content_area.content = _page_column(page_body)
-            # Charts were often mutated while unmounted; rebuild so the tab
-            # never opens on a stale Canvas from the last visit.
+            # Charts were often mutated while unmounted; rebuild on the UI
+            # loop so the tab never opens on a stale Canvas from the last visit.
             if idx == 1:
-                update_charts(push=True)
+                request_charts_paint()
             page.update()
 
         nav.on_change = on_nav
@@ -1481,13 +1508,13 @@ def run_gui(
                         rebuild_live_activity()
                     except Exception:
                         pass
-                    # GPU series for Charts: sample between full polls, then
-                    # push a Canvas rebuild (page.update alone often left charts
-                    # frozen while the Status tab looked live).
+                    # GPU series for Charts: sample on a worker, paint on the
+                    # Flet event loop — Canvas does not reliably redraw when
+                    # charts_host.update() runs from a plain threading.Thread.
                     if live_tick_n["n"] % LIVE_GPU_INTERVAL_S == 0:
                         try:
                             if ingest_live_gpu_metrics():
-                                update_charts(push=True)
+                                request_live_status_paint()
                         except Exception:
                             pass
                     update_poll_footer()
