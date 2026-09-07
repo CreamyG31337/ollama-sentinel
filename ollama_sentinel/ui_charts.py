@@ -1,9 +1,15 @@
-"""Time-series charts from MetricsStore (Flet Canvas — no extra deps)."""
+"""Time-series charts from MetricsStore (Flet Canvas — no extra deps).
+
+Canvases are persistent: live updates mutate ``shapes`` in place and call
+``canvas.update()``. Replacing the whole control tree from a worker thread
+left Charts frozen until a UI-thread click (range buttons).
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, Callable
 
 import flet as ft
 import flet.canvas as cv
@@ -12,12 +18,13 @@ from flet.canvas import Path
 from ollama_sentinel.metrics import MetricField, MetricsStore
 from ollama_sentinel.ui_widgets import PALETTE, section_card
 
-CHART_WIDTH = 640
 CHART_HEIGHT = 88
 PAD_LEFT = 36
 PAD_RIGHT = 12
 PAD_TOP = 6
 PAD_BOTTOM = 16
+# Fallback until the first on_resize reports the laid-out width.
+DEFAULT_CHART_WIDTH = 640
 
 
 @dataclass(frozen=True)
@@ -103,7 +110,7 @@ def format_metric_value(val: float, unit: str) -> str:
 def series_plot_points(
     series: list[tuple[float, float]],
     *,
-    width: float = CHART_WIDTH,
+    width: float = DEFAULT_CHART_WIDTH,
     height: float = CHART_HEIGHT,
     pad_left: float = PAD_LEFT,
     pad_right: float = PAD_RIGHT,
@@ -127,8 +134,8 @@ def series_plot_points(
     if y_hi <= y_lo:
         y_hi = y_lo + 1.0
 
-    plot_w = width - pad_left - pad_right
-    plot_h = height - pad_top - pad_bottom
+    plot_w = max(1.0, width - pad_left - pad_right)
+    plot_h = max(1.0, height - pad_top - pad_bottom)
     pts: list[tuple[float, float]] = []
     for ts, val in series:
         x = pad_left + (ts - t_min) / (t_max - t_min) * plot_w
@@ -137,16 +144,20 @@ def series_plot_points(
     return pts, y_lo, y_hi
 
 
-def _build_canvas_shapes(
+def build_canvas_shapes(
     series: list[tuple[float, float]],
     *,
     spec: ChartSpec,
+    width: float = DEFAULT_CHART_WIDTH,
+    height: float = CHART_HEIGHT,
 ) -> list:
-    pts, y_lo, y_hi = series_plot_points(series, ymin=spec.ymin, ymax=spec.ymax)
+    pts, y_lo, y_hi = series_plot_points(
+        series, width=width, height=height, ymin=spec.ymin, ymax=spec.ymax
+    )
     plot_left = PAD_LEFT
     plot_top = PAD_TOP
-    plot_w = CHART_WIDTH - PAD_LEFT - PAD_RIGHT
-    plot_h = CHART_HEIGHT - PAD_TOP - PAD_BOTTOM
+    plot_w = max(1.0, width - PAD_LEFT - PAD_RIGHT)
+    plot_h = max(1.0, height - PAD_TOP - PAD_BOTTOM)
 
     shapes: list = [
         cv.Rect(
@@ -189,6 +200,14 @@ def _build_canvas_shapes(
     )
 
     if len(pts) < 2:
+        shapes.append(
+            cv.Text(
+                x=plot_left + 8,
+                y=plot_top + plot_h / 2 - 6,
+                value="Not enough data yet",
+                style=ft.TextStyle(size=12, color=PALETTE["muted"]),
+            )
+        )
         return shapes
 
     area_elements: list = [Path.MoveTo(x=pts[0][0], y=pts[0][1])]
@@ -236,53 +255,100 @@ def _build_canvas_shapes(
     return shapes
 
 
-def metric_chart_card(spec: ChartSpec, series: list[tuple[float, float]]) -> ft.Control:
-    current = series[-1][1] if series else None
-    sample_n = len(series)
+# Back-compat alias used by older tests / callers.
+_build_canvas_shapes = build_canvas_shapes
+CHART_WIDTH = DEFAULT_CHART_WIDTH
 
-    header_bits: list[ft.Control] = [
-        ft.Text(spec.title, size=13, weight=ft.FontWeight.W_500),
-    ]
-    if current is not None:
-        header_bits.append(
-            ft.Text(
-                format_metric_value(current, spec.unit),
-                size=18,
-                weight=ft.FontWeight.BOLD,
-                color=spec.color,
-            )
+
+@dataclass
+class LiveChart:
+    """One persistent metric card: mutate canvas.shapes instead of rebuilding cards."""
+
+    spec: ChartSpec
+    title: ft.Text
+    value_text: ft.Text
+    meta_text: ft.Text
+    canvas: cv.Canvas
+    series: list[tuple[float, float]] = field(default_factory=list)
+    width: float = DEFAULT_CHART_WIDTH
+    height: float = CHART_HEIGHT
+    card: ft.Control | None = None
+
+    def redraw(self, *, push: bool = True) -> None:
+        # Mutate the existing shapes list in place — assigning a new list is
+        # what left Canvas frozen until a UI-thread click in Flet 0.86.
+        new_shapes = build_canvas_shapes(
+            self.series, spec=self.spec, width=self.width, height=self.height
         )
-    else:
-        header_bits.append(ft.Text("—", size=18, color=PALETTE["muted"]))
+        shapes = self.canvas.shapes
+        shapes.clear()
+        shapes.extend(new_shapes)
+        if push:
+            try:
+                self.canvas.update()
+            except Exception:
+                pass
 
-    meta = f"{sample_n} sample{'s' if sample_n != 1 else ''}"
-    if spec.note:
-        meta = f"{meta} · {spec.note}"
-    header_bits.append(ft.Text(meta, size=10, color=PALETTE["muted"]))
+    def set_series(self, series: list[tuple[float, float]], *, push: bool = True) -> None:
+        self.series = list(series)
+        current = self.series[-1][1] if self.series else None
+        if current is not None:
+            self.value_text.value = format_metric_value(current, self.spec.unit)
+            self.value_text.color = self.spec.color
+        else:
+            self.value_text.value = "—"
+            self.value_text.color = PALETTE["muted"]
+        meta = f"{len(self.series)} sample{'s' if len(self.series) != 1 else ''}"
+        if self.spec.note:
+            meta = f"{meta} · {self.spec.note}"
+        self.meta_text.value = meta
+        self.redraw(push=push)
+        if push:
+            try:
+                self.value_text.update()
+                self.meta_text.update()
+            except Exception:
+                pass
 
-    if sample_n < 2:
-        body: ft.Control = ft.Container(
-            content=ft.Text(
-                "Not enough data yet",
-                size=12,
-                color=PALETTE["muted"],
-            ),
+    def set_width(self, width: float, *, push: bool = True) -> None:
+        if width <= 1:
+            return
+        if abs(width - self.width) < 1:
+            return
+        self.width = width
+        self.redraw(push=push)
+
+
+def make_live_chart(spec: ChartSpec) -> LiveChart:
+    title = ft.Text(spec.title, size=13, weight=ft.FontWeight.W_500)
+    value_text = ft.Text("—", size=18, weight=ft.FontWeight.BOLD, color=PALETTE["muted"])
+    meta_text = ft.Text("0 samples", size=10, color=PALETTE["muted"])
+    chart = LiveChart(
+        spec=spec,
+        title=title,
+        value_text=value_text,
+        meta_text=meta_text,
+        canvas=cv.Canvas(
+            expand=True,
+            width=float("inf"),
             height=CHART_HEIGHT,
-            alignment=ft.Alignment.CENTER_LEFT,
-        )
-    else:
-        body = cv.Canvas(
-            width=CHART_WIDTH,
-            height=CHART_HEIGHT,
-            shapes=_build_canvas_shapes(series, spec=spec),
-        )
+            shapes=build_canvas_shapes([], spec=spec),
+            resize_interval=50,
+        ),
+    )
 
-    return ft.Card(
+    def on_resize(e) -> None:
+        w = getattr(e, "width", None)
+        if w is not None:
+            chart.set_width(float(w), push=True)
+
+    chart.canvas.on_resize = on_resize
+    chart.card = ft.Card(
         content=ft.Container(
             content=ft.Row(
                 [
-                    ft.Column(header_bits, spacing=2, width=130),
-                    ft.Container(content=body, expand=True),
+                    ft.Column([title, value_text, meta_text], spacing=2, width=130),
+                    ft.Container(content=chart.canvas, expand=True, height=CHART_HEIGHT),
                 ],
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -291,6 +357,64 @@ def metric_chart_card(spec: ChartSpec, series: list[tuple[float, float]]) -> ft.
         ),
         elevation=1,
     )
+    return chart
+
+
+@dataclass
+class LiveChartsPanel:
+    """Persistent Charts tab body — refresh data without tearing down Canvases."""
+
+    charts: list[LiveChart]
+    column: ft.Column
+    subtitle: ft.Text | None = None
+
+    def refresh(
+        self,
+        store: MetricsStore | None,
+        *,
+        window_s: float,
+        server: str | None = None,
+        poll_interval: float = 2.0,
+        push: bool = True,
+    ) -> None:
+        if store is None:
+            if self.subtitle is not None:
+                self.subtitle.value = "Metrics disabled (set METRICS=1 in .env)"
+            return
+        if self.subtitle is not None:
+            self.subtitle.value = charts_subtitle(
+                store,
+                window_s=window_s,
+                server=server,
+                poll_interval=poll_interval,
+            )
+            if push:
+                try:
+                    self.subtitle.update()
+                except Exception:
+                    pass
+        for chart in self.charts:
+            series = store.series(chart.spec.field, window_s=window_s, server=server)
+            chart.set_series(series, push=push)
+
+
+def build_live_charts_panel(*, subtitle: ft.Text | None = None) -> LiveChartsPanel:
+    charts = [make_live_chart(spec) for spec in CHART_SPECS]
+    column = ft.Column(
+        [c.card for c in charts if c.card is not None],
+        spacing=8,
+        expand=True,
+        scroll=ft.ScrollMode.AUTO,
+    )
+    return LiveChartsPanel(charts=charts, column=column, subtitle=subtitle)
+
+
+def metric_chart_card(spec: ChartSpec, series: list[tuple[float, float]]) -> ft.Control:
+    """One-shot card (tests / non-live callers). Prefer LiveChartsPanel in the GUI."""
+    chart = make_live_chart(spec)
+    chart.set_series(series, push=False)
+    assert chart.card is not None
+    return chart.card
 
 
 def metrics_charts_panel(
@@ -304,10 +428,6 @@ def metrics_charts_panel(
             "Metrics",
             ft.Text("Metrics disabled (set METRICS=1 in .env)", size=12, color=PALETTE["muted"]),
         )
-
-    cards: list[ft.Control] = []
-    for spec in CHART_SPECS:
-        series = store.series(spec.field, window_s=window_s, server=server)
-        cards.append(metric_chart_card(spec, series))
-
-    return ft.Column(cards, spacing=8)
+    panel = build_live_charts_panel()
+    panel.refresh(store, window_s=window_s, server=server, push=False)
+    return panel.column

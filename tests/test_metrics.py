@@ -56,9 +56,11 @@ def test_llama_util_from_proc_rows():
             {"name": "dwm.exe", "bytes": 1e8, "engine_3d_pct": 2.0},
         ],
         ts=ts,
+        server="cr-desktop-3090",
     )
-    series = store.series("llama_util", window_s=60)
+    series = store.series("llama_util", window_s=60, server="cr-desktop-3090")
     assert series[0][1] == 72.0
+    assert store.series("llama_util", window_s=60, server="remote") == []
 
 
 def test_snapshot_export():

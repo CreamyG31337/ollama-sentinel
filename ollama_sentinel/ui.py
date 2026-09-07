@@ -51,7 +51,7 @@ from ollama_sentinel.telemetry import (
 )
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
-from ollama_sentinel.ui_charts import charts_subtitle, metrics_charts_panel
+from ollama_sentinel.ui_charts import charts_subtitle, build_live_charts_panel
 from ollama_sentinel.settings import apply_to_config, effective, load_settings, set_setting
 from ollama_sentinel.ui_widgets import (
     PALETTE,
@@ -110,6 +110,8 @@ def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) ->
     poll_state["alarms"] = []
     poll_state["reachable"] = True
     poll_state["optional"] = False
+    poll_state["live_gpus"] = None
+    poll_state["live_gpus_server"] = None
 
 
 def show_local_process_panels(local_gpu: bool) -> bool:
@@ -349,13 +351,13 @@ def run_gui(
         # one server's data under another server's name.
         refresh_guard = RefreshGuard()
         library_host = ft.Column(spacing=8, expand=True)
-        charts_host = ft.Column(spacing=8, expand=True, scroll=ft.ScrollMode.AUTO)
         charts_subtitle_text = ft.Text("", size=12, color=PALETTE["muted"])
         chart_window_s = {"value": 300.0}
         nav_state = {"index": 0}
-        live_tick_n = {"n": 0}
         # nvidia-smi is ~70ms here — safe to sample between full Ollama polls.
         LIVE_GPU_INTERVAL_S = 2
+        live_charts = build_live_charts_panel(subtitle=charts_subtitle_text)
+        charts_host = live_charts.column
         discover_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
         discover_state: dict[str, Any] = {
             "sort": "trendingScore",
@@ -384,57 +386,31 @@ def run_gui(
                     return s
             return servers[0]
 
-        def update_charts(*, push: bool = False) -> None:
+        def update_charts(*, push: bool = True) -> None:
+            """Refresh persistent chart Canvases from the metrics store."""
             if metrics_store is None:
                 charts_subtitle_text.value = "Metrics disabled (set METRICS=1 in .env)"
-                charts_host.controls = [
-                    ft.Text("Charts unavailable while metrics are off.", size=12, color=PALETTE["muted"]),
-                ]
-            else:
-                srv = get_server_cfg()
-                charts_subtitle_text.value = charts_subtitle(
-                    metrics_store,
-                    window_s=chart_window_s["value"],
-                    server=srv.name,
-                    poll_interval=LIVE_GPU_INTERVAL_S,
-                )
-                charts_host.controls = [
-                    metrics_charts_panel(
-                        metrics_store,
-                        window_s=chart_window_s["value"],
-                        server=srv.name,
-                    ),
-                ]
-            if push:
-                # Prefer page.update() on the UI loop — Canvas often ignores
-                # charts_host.update() from a worker thread (range buttons work
-                # because they already run on the event loop).
-                try:
-                    page.update()
-                except Exception:
+                if push:
                     try:
                         charts_subtitle_text.update()
-                        charts_host.update()
                     except Exception:
                         pass
-
-        async def paint_charts_async() -> None:
-            """Rebuild chart Canvas on Flet's event loop (thread-safe)."""
-            update_charts(push=False)
-            page.update()
-
-        def request_charts_paint() -> None:
-            try:
-                page.run_task(paint_charts_async)
-            except Exception:
-                # Fallback if the page is tearing down.
-                update_charts(push=True)
+                return
+            srv = get_server_cfg()
+            live_charts.refresh(
+                metrics_store,
+                window_s=chart_window_s["value"],
+                server=srv.name,
+                poll_interval=LIVE_GPU_INTERVAL_S,
+                push=push,
+            )
 
         def ingest_live_gpu_metrics() -> bool:
             """Sample nvidia-smi into the metrics store between full Ollama polls."""
             if metrics_store is None:
                 return False
             srv = get_server_cfg()
+            target = srv.name
             if not srv.local_gpu:
                 return False
             if not poll_state.get("reachable", True):
@@ -445,41 +421,70 @@ def run_gui(
                 return False
             if not gpus:
                 return False
+            # Drop the sample if the user switched hosts while nvidia-smi ran.
+            if get_server_cfg().name != target:
+                return False
             now = time.time()
             metrics_store.ingest_snapshot(
                 {
                     "reachable": True,
-                    "server": srv.name,
+                    "server": target,
                     "polled_at_ts": now,
                     "models": last_snap.get("models") or [],
                     "gpus": gpus,
                 }
             )
             poll_state["live_gpus"] = gpus
+            poll_state["live_gpus_server"] = target
             return True
 
-        async def paint_live_status_async() -> None:
-            """Push live GPU card + charts from the UI loop."""
+        def paint_live_gpu_cards() -> None:
             gpus = poll_state.get("live_gpus")
-            if gpus is not None and nav_state["index"] == 0:
-                gpu_host.controls.clear()
-                for gpu in gpus:
-                    gpu_host.controls.append(gpu_table(gpu))
-            update_charts(push=False)
-            update_poll_footer()
-            page.update()
-
-        def request_live_status_paint() -> None:
+            if gpus is None or nav_state["index"] != 0:
+                return
+            if poll_state.get("live_gpus_server") != get_server_cfg().name:
+                return
+            gpu_host.controls.clear()
+            for gpu in gpus:
+                gpu_host.controls.append(gpu_table(gpu))
             try:
-                page.run_task(paint_live_status_async)
+                gpu_host.update()
             except Exception:
-                update_charts(push=True)
+                pass
 
         def on_chart_window(e) -> None:
             sel = e.control.selected
             if sel:
                 chart_window_s["value"] = float(sel[0])
             update_charts(push=True)
+
+        async def charts_live_loop() -> None:
+            """UI-loop task: sample GPU off-thread, paint Canvases on-thread.
+
+            Replacing chart controls from a worker thread never redraws Flet
+            Canvas; mutating shapes here (same path as range-button clicks) does.
+            """
+            import asyncio
+
+            while True:
+                await asyncio.sleep(LIVE_GPU_INTERVAL_S)
+                try:
+                    srv = get_server_cfg()
+                    if srv.local_gpu and poll_state.get("reachable", True):
+                        ingested = await asyncio.to_thread(ingest_live_gpu_metrics)
+                        if ingested:
+                            paint_live_gpu_cards()
+                    # Always refresh chart shapes from the store (covers full-poll
+                    # ingest too) so the Charts tab moves without a range click.
+                    update_charts(push=True)
+                    update_poll_footer()
+                    try:
+                        freshness_host.update()
+                        poll_footer.update()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
         chart_window_pick = ft.SegmentedButton(
             selected=["300"],
@@ -821,6 +826,7 @@ def run_gui(
                     metrics_store.ingest_proc_vram(
                         pv.get("rows") or [],
                         ts=pv.get("polled_at_ts"),
+                        server=srv.name if srv.local_gpu else None,
                     )
                 if show_local_process_panels(srv.local_gpu):
                     pv_ts = pv.get("polled_at_ts")
@@ -895,9 +901,15 @@ def run_gui(
             else:
                 gaming_status.value = ""
 
-            # Canvas must be rebuilt on the Flet event loop; doing it only on
-            # this worker thread left Charts frozen until a range click.
-            request_charts_paint()
+            # Canvas must be painted on the Flet event loop (worker-thread
+            # canvas.update is a no-op / silently fails).
+            async def _paint_charts() -> None:
+                update_charts(push=True)
+
+            try:
+                page.run_task(_paint_charts)
+            except Exception:
+                pass
             page.update()
 
             # Doctor after first paint (local host only).
@@ -1417,14 +1429,16 @@ def run_gui(
             )
             poll_state["live_ts"] = None
             poll_state["alarms"] = []
+            poll_state["live_gpus"] = None
+            poll_state["live_gpus_server"] = None
 
             library_host.controls = [
                 ft.Text(caption, size=12, color=PALETTE["muted"])
             ]
             charts_subtitle_text.value = caption
-            charts_host.controls = [
-                ft.Text(caption, size=12, color=PALETTE["muted"])
-            ]
+            # Keep persistent chart Canvases; just clear their series.
+            for chart in live_charts.charts:
+                chart.set_series([], push=False)
 
             poll_footer.value = caption
             poll_footer.color = PALETTE["muted"]
@@ -1474,10 +1488,10 @@ def run_gui(
             nav_state["index"] = idx
             page_body = pages[idx]
             content_area.content = _page_column(page_body)
-            # Charts were often mutated while unmounted; rebuild on the UI
-            # loop so the tab never opens on a stale Canvas from the last visit.
+            # Charts were often mutated while unmounted; refresh shapes so the
+            # tab never opens on stale geometry from the last visit / size.
             if idx == 1:
-                request_charts_paint()
+                update_charts(push=True)
             page.update()
 
         nav.on_change = on_nav
@@ -1486,6 +1500,7 @@ def run_gui(
         kick_fleet_probe()
         kick_refresh()
         do_search()
+        page.run_task(charts_live_loop)
 
         def poll_loop():
             while True:
@@ -1499,24 +1514,15 @@ def run_gui(
         def footer_tick_loop():
             while True:
                 time.sleep(1)
-                live_tick_n["n"] += 1
                 try:
                     # Activity from logs is cheap; refresh it every second so
                     # n_gen / phase track generation without waiting for the
-                    # full 5s Ollama poll.
+                    # full 5s Ollama poll. GPU/charts run on charts_live_loop
+                    # (Flet event loop) so Canvas actually redraws.
                     try:
                         rebuild_live_activity()
                     except Exception:
                         pass
-                    # GPU series for Charts: sample on a worker, paint on the
-                    # Flet event loop — Canvas does not reliably redraw when
-                    # charts_host.update() runs from a plain threading.Thread.
-                    if live_tick_n["n"] % LIVE_GPU_INTERVAL_S == 0:
-                        try:
-                            if ingest_live_gpu_metrics():
-                                request_live_status_paint()
-                        except Exception:
-                            pass
                     update_poll_footer()
                     try:
                         freshness_host.update()

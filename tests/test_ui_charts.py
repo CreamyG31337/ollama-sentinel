@@ -7,8 +7,10 @@ import time
 from ollama_sentinel.metrics import MetricsStore
 from ollama_sentinel.ui_charts import (
     CHART_WIDTH,
+    CHART_SPECS,
     charts_subtitle,
     format_metric_value,
+    make_live_chart,
     series_plot_points,
 )
 
@@ -22,6 +24,18 @@ def test_series_plot_points_maps_time_and_value():
     assert len(pts) == 2
     assert pts[0][0] < pts[1][0]
     assert pts[0][1] > pts[1][1]  # higher value = lower y
+
+
+def test_live_chart_mutates_shapes_in_place():
+    chart = make_live_chart(CHART_SPECS[0])
+    shapes_id = id(chart.canvas.shapes)
+    now = time.time()
+    chart.set_series([(now - 10, 10.0), (now, 90.0)], push=False)
+    assert id(chart.canvas.shapes) == shapes_id
+    assert len(chart.canvas.shapes) > 2
+    chart.set_width(800, push=False)
+    assert id(chart.canvas.shapes) == shapes_id
+    assert chart.width == 800
 
 
 def test_series_plot_points_empty():

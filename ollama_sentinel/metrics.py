@@ -71,6 +71,7 @@ class LlamaUtilPoint:
     ts: float
     max_util: float
     busy_runners: int
+    server: str = "local"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,7 +131,13 @@ class MetricsStore:
             self._load.append(load_pt)
         self._maybe_log(ts, server, points, load_pt)
 
-    def ingest_proc_vram(self, rows: list[dict[str, Any]], *, ts: float | None = None) -> None:
+    def ingest_proc_vram(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        ts: float | None = None,
+        server: str | None = None,
+    ) -> None:
         """Piggyback on ProcessVramCollector output (30 s cadence on Windows)."""
         if not rows:
             return
@@ -145,7 +152,12 @@ class MetricsStore:
             max_util = max(max_util, util)
             if util >= 5.0:
                 busy += 1
-        pt = LlamaUtilPoint(ts=now, max_util=max_util, busy_runners=busy)
+        pt = LlamaUtilPoint(
+            ts=now,
+            max_util=max_util,
+            busy_runners=busy,
+            server=str(server or "local"),
+        )
         with self._lock:
             self._prune_locked(now)
             self._llama_util.append(pt)
@@ -173,6 +185,8 @@ class MetricsStore:
             elif field == "llama_util":
                 for pt in self._llama_util:
                     if pt.ts < cutoff:
+                        continue
+                    if server and pt.server != server:
                         continue
                     out.append((pt.ts, pt.max_util))
             else:
