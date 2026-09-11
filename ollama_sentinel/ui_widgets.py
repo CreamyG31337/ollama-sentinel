@@ -276,6 +276,26 @@ def section_card(
     )
 
 
+_FRESHNESS_BG = {
+    "ok": ft.Colors.GREEN_900,
+    "aging": ft.Colors.ORANGE_900,
+    "stale": ft.Colors.RED_900,
+    "unknown": ft.Colors.BLUE_GREY_900,
+}
+_FRESHNESS_FG = {
+    "ok": PALETTE["ok"],
+    "aging": PALETTE["warn"],
+    "stale": PALETTE["alarm"],
+    "unknown": PALETTE["muted"],
+}
+_FRESHNESS_BADGE = {
+    "ok": "FRESH",
+    "aging": "LATE",
+    "stale": "STALE",
+    "unknown": "…",
+}
+
+
 def freshness_banner(
     *,
     level: str,
@@ -283,24 +303,9 @@ def freshness_banner(
     interval_s: float | None = None,
 ) -> ft.Container:
     """Top-of-status strip: how old the last full poll is (ticks every second)."""
-    bg = {
-        "ok": ft.Colors.GREEN_900,
-        "aging": ft.Colors.ORANGE_900,
-        "stale": ft.Colors.RED_900,
-        "unknown": ft.Colors.BLUE_GREY_900,
-    }.get(level, ft.Colors.BLUE_GREY_900)
-    fg = {
-        "ok": PALETTE["ok"],
-        "aging": PALETTE["warn"],
-        "stale": PALETTE["alarm"],
-        "unknown": PALETTE["muted"],
-    }.get(level, PALETTE["muted"])
-    badge = {
-        "ok": "FRESH",
-        "aging": "LATE",
-        "stale": "STALE",
-        "unknown": "…",
-    }.get(level, "…")
+    bg = _FRESHNESS_BG.get(level, ft.Colors.BLUE_GREY_900)
+    fg = _FRESHNESS_FG.get(level, PALETTE["muted"])
+    badge = _FRESHNESS_BADGE.get(level, "…")
     hint = f"full poll every {interval_s:g}s" if interval_s else None
     row: list[ft.Control] = [
         ft.Container(
@@ -319,6 +324,57 @@ def freshness_banner(
         border_radius=8,
         bgcolor=bg,
     )
+
+
+class LiveFreshnessBanner:
+    """Freshness strip built once and mutated in place.
+
+    The 1 Hz footer tick used to replace ``freshness_host.content`` with a
+    fresh ``freshness_banner()`` — ~43k mount/unmount cycles per overnight
+    run, each a patch surface for the cross-thread race that blanks the
+    window. The live variant keeps one control tree and only mutates text /
+    colors, returning whether anything actually changed so the caller can
+    skip the update entirely.
+    """
+
+    def __init__(self, *, interval_s: float | None = None) -> None:
+        self.badge_text = ft.Text("", size=11, weight=ft.FontWeight.BOLD, color=ft.Colors.WHITE)
+        self.badge = ft.Container(
+            content=self.badge_text,
+            bgcolor=PALETTE["muted"],
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+            border_radius=4,
+        )
+        self.label = ft.Text("", size=12, color=ft.Colors.WHITE70, expand=True)
+        row: list[ft.Control] = [self.badge, self.label]
+        if interval_s:
+            row.append(ft.Text(f"full poll every {interval_s:g}s", size=11, color=PALETTE["muted"]))
+        self.control = ft.Container(
+            content=ft.Row(row, spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=10,
+            border_radius=8,
+            bgcolor=ft.Colors.BLUE_GREY_900,
+        )
+
+    def set(self, level: str, label: str) -> bool:
+        """Mutate the strip for ``level``/``label``; True if anything changed."""
+        changed = False
+        bg = _FRESHNESS_BG.get(level, ft.Colors.BLUE_GREY_900)
+        fg = _FRESHNESS_FG.get(level, PALETTE["muted"])
+        badge = _FRESHNESS_BADGE.get(level, "…")
+        if self.control.bgcolor != bg:
+            self.control.bgcolor = bg
+            changed = True
+        if self.badge.bgcolor != fg:
+            self.badge.bgcolor = fg
+            changed = True
+        if self.badge_text.value != badge:
+            self.badge_text.value = badge
+            changed = True
+        if self.label.value != label:
+            self.label.value = label
+            changed = True
+        return changed
 
 
 def alarm_banner(
@@ -474,6 +530,115 @@ def activity_card(activity: ServerActivity | dict[str, Any] | None) -> ft.Contro
         )
 
     return section_card("Last activity", ft.Column(lines, spacing=4))
+
+
+def _fp_round(value: Any, nd: int = 1) -> Any:
+    """Round a numeric for fingerprinting; None passes through."""
+    if value is None:
+        return None
+    return round(float(value), nd)
+
+
+def activity_fingerprint(activity: Any) -> tuple | None:
+    """Hashable summary of everything ``activity_card`` renders.
+
+    The footer tick rebuilds the activity card every second; comparing
+    fingerprints first means an idle server paints nothing at all. Values
+    that only jitter below display precision (tok/s, runner util) are
+    rounded so the card does not churn on noise. Pure function, no Flet.
+    """
+    if activity is None:
+        return None
+    if not isinstance(activity, dict):
+        activity = activity.to_dict()
+
+    def req_key(req: dict[str, Any] | None) -> tuple | None:
+        if not req:
+            return None
+        return (
+            req.get("method"),
+            req.get("path"),
+            req.get("client"),
+            req.get("client_name"),
+            _fp_round(req.get("duration_s"), 2),
+        )
+
+    peers = tuple(
+        sorted(
+            (str(p.get("addr") or "?"), p.get("name"))
+            for p in activity.get("peers") or []
+        )
+    )
+    runners = tuple(
+        (
+            r.get("pid"),
+            bool(r.get("busy")),
+            _fp_round(r.get("engine_3d_pct") or 0),
+            _fp_round((r.get("vram_bytes") or 0) / 1e9),
+        )
+        for r in activity.get("runners") or []
+    )
+    recent = tuple(req_key(r) for r in activity.get("recent_requests") or [])
+    return (
+        activity.get("phase"),
+        activity.get("summary"),
+        bool(activity.get("stale")),
+        activity.get("model"),
+        activity.get("n_gen"),
+        _fp_round(activity.get("gen_tps")),
+        _fp_round(activity.get("gen_tps_3s")),
+        activity.get("prompt_tokens"),
+        activity.get("n_ctx_slot"),
+        req_key(activity.get("last_request")),
+        recent,
+        peers,
+        runners,
+    )
+
+
+# Keys of a GPU dict that the status table renders, in display order.
+# memory_* byte counts are compared as GB at the 0.1 precision the table shows.
+_GPU_FP_KEYS = (
+    "name",
+    "index",
+    "temperature",
+    "fan_speed",
+    "utilization",
+    "memory_utilization",
+    "power_draw",
+    "power_limit",
+    "power_limit_enforced",
+    "pstate",
+    "clock_sm",
+    "clock_mem",
+    "throttle_hw_thermal",
+    "throttle_sw_power_cap",
+    "memory_used",
+    "memory_free",
+    "memory_total",
+    "memory_reserved",
+)
+
+
+def gpu_fingerprint(gpus: list[dict[str, Any]] | None) -> tuple:
+    """Hashable summary of the GPU tables at display precision.
+
+    util %, watts, clocks and GB are rounded to one decimal (the table shows
+    ``%.1f``), so sub-display jitter from nvidia-smi does not rebuild cards.
+    """
+    out: list[tuple] = []
+    for gpu in gpus or []:
+        row = []
+        for key in _GPU_FP_KEYS:
+            value = gpu.get(key)
+            if value is None or isinstance(value, bool) or isinstance(value, str):
+                row.append(value)
+            elif key.startswith("memory_"):
+                row.append(round(float(value) / 1e9, 1))
+            else:
+                row.append(round(float(value), 1))
+        out.append(tuple(row))
+    return tuple(out)
 
 
 def process_vram_table(

@@ -76,3 +76,38 @@ class RefreshGuard:
     def applied(self) -> int:
         with self._lock:
             return self._applied
+
+
+class SingleFlight:
+    """At most one run at a time; requests during a run cause exactly one rerun.
+
+    A manual Refresh click, a host switch and the 5s poll timer all want the
+    same refresh work. Starting a thread per request let them stack (each
+    doing HTTP + nvidia-smi); dropping the request would lose a host switch
+    that arrived mid-refresh. Coalescing instead: while a run is in flight,
+    ``request`` only records that one more pass is wanted, and the running
+    worker sees ``finish() -> True`` and loops exactly once more.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running = False
+        self._pending = False
+
+    def request(self) -> bool:
+        """True -> caller should start (or continue) the work; False -> coalesced."""
+        with self._lock:
+            if self._running:
+                self._pending = True
+                return False
+            self._running = True
+            return True
+
+    def finish(self) -> bool:
+        """True -> a request arrived during the run, so run once more."""
+        with self._lock:
+            if self._pending:
+                self._pending = False
+                return True
+            self._running = False
+            return False

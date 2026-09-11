@@ -31,5 +31,44 @@ class ShowCacheFetchAllTests(unittest.TestCase):
         self.assertLessEqual(show_mod.DEFAULT_TIMEOUT, 10)
 
 
+class ShowCacheBoundTests(unittest.TestCase):
+    def test_cap_evicts_oldest_insertion(self):
+        cache = ShowCache(ttl=900, max_entries=3)
+
+        def fake_fetch(url, model, *, timeout=5):
+            return {"model": model}
+
+        with patch("ollama_sentinel.show.fetch_show", side_effect=fake_fetch):
+            for i in range(5):
+                cache.get("http://x", f"m{i}")
+        self.assertEqual(len(cache._entries), 3)
+        self.assertIn("http://x|m4", cache._entries)
+        self.assertNotIn("http://x|m0", cache._entries)
+
+    def test_expired_entries_dropped_on_write(self):
+        cache = ShowCache(ttl=0.05)
+
+        def fake_fetch(url, model, *, timeout=5):
+            return {"model": model}
+
+        with patch("ollama_sentinel.show.fetch_show", side_effect=fake_fetch):
+            cache.get("http://x", "old")
+            time.sleep(0.1)
+            cache.get("http://x", "new")
+        self.assertEqual(list(cache._entries), ["http://x|new"])
+
+    def test_get_is_thread_safe_under_fetch_all(self):
+        cache = ShowCache(ttl=900, max_entries=8)
+
+        def fake_fetch(url, model, *, timeout=5):
+            time.sleep(0.02)
+            return {"model": model}
+
+        with patch("ollama_sentinel.show.fetch_show", side_effect=fake_fetch):
+            out = cache.fetch_all("http://x", [f"m{i}" for i in range(8)])
+        self.assertEqual(len(out), 8)
+        self.assertEqual(len(cache._entries), 8)
+
+
 if __name__ == "__main__":
     unittest.main()

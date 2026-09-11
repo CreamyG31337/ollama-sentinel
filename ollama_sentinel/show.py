@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +16,7 @@ from ollama_sentinel.show_parse import parse_show_bundle
 DEFAULT_TIMEOUT = 5
 DEFAULT_TTL = 900.0
 _SHOW_WORKERS = 8
+_DEFAULT_MAX_ENTRIES = 200
 
 
 def fetch_show(url: str, model: str, *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
@@ -41,19 +43,39 @@ def fetch_show(url: str, model: str, *, timeout: float = DEFAULT_TIMEOUT) -> dic
 
 
 class ShowCache:
-    def __init__(self, *, ttl: float = DEFAULT_TTL) -> None:
+    """Bounded, thread-safe /api/show cache.
+
+    ``fetch_all`` calls ``get`` from up to 8 threads, so the entry dict is
+    guarded by a lock; without it two threads could interleave reads/writes
+    and one model's bundle could be lost from the map. Expired entries are
+    dropped on write and the store is capped (oldest insertion evicted) so a
+    GUI left running for days cannot grow it without bound.
+    """
+
+    def __init__(self, *, ttl: float = DEFAULT_TTL, max_entries: int = _DEFAULT_MAX_ENTRIES) -> None:
         self.ttl = ttl
+        self.max_entries = max(1, max_entries)
+        self._lock = threading.Lock()
         self._entries: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def get(self, url: str, model: str, *, force: bool = False) -> dict[str, Any]:
         key = f"{url}|{model}"
         now = time.time()
-        if not force:
-            hit = self._entries.get(key)
-            if hit and (now - hit[0]) < self.ttl:
-                return hit[1]
+        with self._lock:
+            if not force:
+                hit = self._entries.get(key)
+                if hit and (now - hit[0]) < self.ttl:
+                    return hit[1]
         bundle = fetch_show(url, model)
-        self._entries[key] = (now, bundle)
+        with self._lock:
+            # Drop expired entries on write; a cap alone would keep them.
+            self._entries = {
+                k: v for k, v in self._entries.items() if (now - v[0]) < self.ttl
+            }
+            if key not in self._entries:
+                while len(self._entries) >= self.max_entries:
+                    self._entries.pop(next(iter(self._entries)))
+            self._entries[key] = (now, bundle)
         return bundle
 
     def fetch_all(self, url: str, model_names: list[str]) -> dict[str, dict[str, Any]]:

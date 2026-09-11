@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 windows = ["win11toast>=0.35,<1"]
-gui = ["flet>=0.24,<1", "pystray>=0.19,<1", "Pillow>=10,<12"]
+gui = ["flet>=0.80,<1", "pystray>=0.19,<1", "Pillow>=10,<12"]
 
 [project.scripts]
 ollama-sentinel = "ollama_sentinel.__main__:main"

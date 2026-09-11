@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import logging
+import logging.handlers
+import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import flet as ft
@@ -34,7 +39,8 @@ from ollama_sentinel.advisor import (
 )
 from ollama_sentinel.inventory import build_inventory, enrich_inventory_rows, inventory_summary
 from ollama_sentinel.poll import poll_all
-from ollama_sentinel.refresh_guard import RefreshGuard
+from ollama_sentinel.panel_hold import UnreachableHold
+from ollama_sentinel.refresh_guard import RefreshGuard, SingleFlight
 from ollama_sentinel.net_errors import format_network_error
 from ollama_sentinel.pull import pull_model
 from ollama_sentinel.proc_vram import ProcessVramCollector
@@ -56,18 +62,90 @@ from ollama_sentinel.ui_charts import charts_subtitle, build_live_charts_panel
 from ollama_sentinel.settings import apply_to_config, effective, load_settings, set_setting
 from ollama_sentinel.ui_widgets import (
     PALETTE,
-    settings_panel,
+    LiveFreshnessBanner,
     activity_card,
+    activity_fingerprint,
     advisor_panel,
     alarm_banner,
     discover_result_tile,
-    freshness_banner,
+    gpu_fingerprint,
     gpu_table,
     library_table,
     loaded_models_table,
     process_vram_table,
     section_card,
+    settings_panel,
 )
+
+log = logging.getLogger(__name__)
+
+# Warn-once state for paint/loop failure sites: the first failure at a site
+# logs a WARNING with traceback; repeats are suppressed for 10 minutes so a
+# per-tick failure cannot flood the log (or be silently swallowed either).
+_WARN_ONCE_INTERVAL_S = 600.0
+_warn_once_state: dict[str, float] = {}
+_warn_once_lock = threading.Lock()
+
+
+def _warn_once(site: str, exc: BaseException) -> None:
+    now = time.monotonic()
+    with _warn_once_lock:
+        last = _warn_once_state.get(site)
+        if last is not None and (now - last) < _WARN_ONCE_INTERVAL_S:
+            return
+        _warn_once_state[site] = now
+    log.warning("ui: %s failed: %r", site, exc, exc_info=exc)
+
+
+# Discover detail cache cap (READMEs are large; 20 expanded tiles is plenty).
+_DETAIL_CACHE_MAX = 20
+
+
+def _gui_log_dir() -> Path:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "ollama-sentinel"
+    return Path.home() / ".ollama-sentinel"
+
+
+def setup_gui_logging(log_dir: Path | None = None) -> Path | None:
+    """Attach a rotating file handler to the ``ollama_sentinel`` logger.
+
+    Under ``pythonw`` ``sys.stderr`` is ``None``, so ``logging.lastResort``
+    silently drops every record: the warn-once failure sites and the
+    visibility INFO lines produced nowhere. Idempotent — calling again for
+    the same path adds no second handler. Returns the log file path, or
+    ``None`` when the directory cannot be created (logging stays as-is
+    rather than taking the GUI down).
+    """
+    directory = log_dir if log_dir is not None else _gui_log_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "gui.log"
+    except OSError:
+        return None
+    logger = logging.getLogger("ollama_sentinel")
+    for handler in logger.handlers:
+        if (
+            isinstance(handler, logging.handlers.RotatingFileHandler)
+            and handler.baseFilename == str(path)
+        ):
+            return path
+    try:
+        file_handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
+    except OSError:
+        return None
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(file_handler)
+    if logger.level == logging.NOTSET or logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
+    return path
 
 
 def _free_vram_summary(gpus: list[dict[str, Any]] | None) -> tuple[float | None, float | None]:
@@ -135,8 +213,43 @@ def host_dropdown_option(name: str, online: bool | None) -> ft.dropdown.Option:
     )
 
 
-def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) -> None:
-    """Drop cached snap / poll age so the footer cannot claim the previous host."""
+def compose_active_alarms(
+    base: list[dict[str, Any]] | None,
+    doctor: list[dict[str, Any]] | None = None,
+    advisor: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Concatenate base, doctor, and advisor alarms without duplicating IDs.
+
+    Preserves first-seen order: base first, then doctor, then advisor.
+    """
+    seen: set[str] = set()
+    composed: list[dict[str, Any]] = []
+    for group in (base, doctor, advisor):
+        if not group:
+            continue
+        for alarm in group:
+            if not isinstance(alarm, dict):
+                composed.append(alarm)
+                continue
+            aid = alarm.get("id")
+            if aid is not None:
+                if aid in seen:
+                    continue
+                seen.add(aid)
+            composed.append(alarm)
+    return composed
+
+
+def clear_switch_state(
+    last_snap: dict[str, Any],
+    poll_state: dict[str, Any],
+    last_advisories: list[Any] | None = None,
+    last_show_by_model: dict[str, Any] | None = None,
+    last_doctor_alarms: list[Any] | None = None,
+    last_advisor_alarms: list[Any] | None = None,
+    hold: UnreachableHold | None = None,
+) -> None:
+    """Drop cached snap / poll age and held data so the footer cannot claim the previous host."""
     last_snap.clear()
     poll_state["polled_ts"] = None
     poll_state["live_ts"] = None
@@ -146,6 +259,16 @@ def clear_switch_state(last_snap: dict[str, Any], poll_state: dict[str, Any]) ->
     poll_state["optional"] = False
     poll_state["live_gpus"] = None
     poll_state["live_gpus_server"] = None
+    if last_advisories is not None:
+        last_advisories.clear()
+    if last_show_by_model is not None:
+        last_show_by_model.clear()
+    if last_doctor_alarms is not None:
+        last_doctor_alarms.clear()
+    if last_advisor_alarms is not None:
+        last_advisor_alarms.clear()
+    if hold is not None:
+        hold.reset()
 
 
 def show_local_process_panels(local_gpu: bool) -> bool:
@@ -184,14 +307,83 @@ def run_gui(
         if icon_path is not None:
             page.window.icon = str(icon_path.resolve())
 
+        # ---- Cross-thread paint marshaling -------------------------------------
+        # Flet 0.86 Page.update() diffs the control tree and mutates the
+        # session index on the *calling* thread with no lock. Two worker
+        # loops patching overlapping subtrees can corrupt that state and the
+        # Flutter client stops rendering — the "blank white window after
+        # days" failure. Every mutation of a mounted control (and its
+        # update) must therefore run on the event loop; this helper is the
+        # only sanctioned path from a worker thread.
+        ui_loop = page.loop  # == page.session.connection.loop
+
+        def _on_loop() -> bool:
+            try:
+                return asyncio.get_running_loop() is ui_loop
+            except RuntimeError:
+                return False
+
+        def ui_call(fn, *, wait: bool = False, timeout: float = 10.0) -> None:
+            """Run fn (control mutations + update) on the Flet event loop."""
+
+            def run() -> None:
+                try:
+                    fn()
+                except Exception as exc:  # surface instead of vanishing
+                    _warn_once(f"ui_call:{getattr(fn, '__name__', 'paint')}", exc)
+
+            if _on_loop():
+                run()  # event handlers and on-loop loops need no marshaling
+                return
+
+            async def _run() -> None:
+                run()
+
+            fut = page.run_task(_run)
+            if wait:
+                # Only ever called from a worker thread — awaiting on-loop
+                # would deadlock the loop the task needs.
+                fut.result(timeout=timeout)
+
+        # ---- Visibility gating -------------------------------------------------
+        # Painting into a hidden/minimized window only floods the client with
+        # a backlog it must chew through on resume (Flet's own
+        # wait_until_visible docstring). Data paths keep running; only the
+        # paints are skipped, and repaint_all() rebuilds the tree on return.
+        ui_state = {"visible": not start_hidden, "missed": False}
+        repaint_gate = {"last": 0.0}
+
+        def can_paint() -> bool:
+            # app_visible covers minimize via the app lifecycle state.
+            return ui_state["visible"] and getattr(page, "app_visible", True)
+
+        def paint_blocked() -> bool:
+            """Gate for timer-driven paints: records that one was skipped.
+
+            ``missed`` is what tells a FOCUS/RESTORE event whether a repaint
+            is actually owed, so an ordinary alt-tab (nothing skipped, window
+            never hidden) costs nothing.
+            """
+            if can_paint():
+                return False
+            ui_state["missed"] = True
+            return True
+
         async def show_window_async() -> None:
+            if not ui_state["visible"]:
+                log.info("ui visible=True (show_window)")
+            ui_state["visible"] = True
             page.window.visible = True
             page.window.skip_task_bar = False
             page.window.minimized = False
             page.window.to_front()
             page.update()
+            await repaint_all()
 
         async def hide_window_async() -> None:
+            if ui_state["visible"]:
+                log.info("ui visible=False (hide_window)")
+            ui_state["visible"] = False
             page.window.visible = False
             page.window.skip_task_bar = True
             page.update()
@@ -200,6 +392,19 @@ def run_gui(
             if getattr(e, "type", None) == ft.WindowEventType.CLOSE:
                 return True
             return getattr(e, "data", None) == "close"
+
+        # A burst of SHOW/RESTORE/FOCUS events must trigger one repaint, not
+        # one per event — request_repaint debounces to one pass per 2 s.
+        _VISIBLE_WINDOW_EVENTS = (
+            ft.WindowEventType.SHOW,
+            ft.WindowEventType.RESTORE,
+            ft.WindowEventType.FOCUS,
+        )
+
+        def _is_show_event(e) -> bool:
+            etype = getattr(e, "type", None)
+            data = getattr(e, "data", None)
+            return any(etype == ev or data == ev.value for ev in _VISIBLE_WINDOW_EVENTS)
 
         async def close_window_async() -> None:
             if gaming_watcher:
@@ -253,6 +458,8 @@ def run_gui(
             def on_window_event(e) -> None:
                 if _is_close_event(e):
                     request_hide_window()
+                elif _is_show_event(e) and ui_state["missed"]:
+                    request_repaint()
 
             page.window.on_event = on_window_event
             tray_icon["icon"] = start_tray(
@@ -269,11 +476,27 @@ def run_gui(
             def on_window_event(e) -> None:
                 if _is_close_event(e):
                     request_close_window()
+                elif _is_show_event(e) and ui_state["missed"]:
+                    request_repaint()
 
             page.window.on_event = on_window_event
             if start_hidden:
                 page.window.visible = False
                 page.window.skip_task_bar = True
+
+        # Coming back from minimized/hidden: app_visible is driven by Flet's
+        # lifecycle events (HIDE/PAUSE -> not visible). If it ever sticks at
+        # False on Windows the UI would freeze, so transitions are logged.
+        def _on_app_lifecycle_change(e) -> None:
+            state = getattr(e, "state", None)
+            if state is None:
+                return
+            visible = state not in (ft.AppLifecycleState.HIDE, ft.AppLifecycleState.PAUSE)
+            log.info("app lifecycle %s -> visible=%s", getattr(state, "value", state), visible)
+            if visible and ui_state["missed"]:
+                request_repaint()
+
+        page.on_app_lifecycle_state_change = _on_app_lifecycle_change
 
         servers = selected_servers(cfg)
         proc_collector: ProcessVramCollector | None = None
@@ -367,7 +590,14 @@ def run_gui(
         update_status_line = ft.Text("", size=12, color=PALETTE["muted"])
         show_cache = ShowCache(ttl=cfg.show_cache_ttl) if cfg.advisor else None
         last_advisories: list = []
-        freshness_host = ft.Container()
+        last_show_by_model: dict[str, dict[str, Any]] = {}
+        last_doctor_alarms: list[dict[str, Any]] = []
+        last_advisor_alarms: list[dict[str, Any]] = []
+        unreachable_hold = UnreachableHold()
+        # One persistent freshness strip, mutated in place by the 1 Hz tick —
+        # not a rebuilt banner per second.
+        live_freshness = LiveFreshnessBanner(interval_s=cfg.poll_interval)
+        freshness_host = ft.Container(content=live_freshness.control)
         poll_footer = ft.Text("", size=12, color=PALETTE["muted"])
         poll_state: dict[str, Any] = {
             "polled_ts": None,
@@ -380,6 +610,10 @@ def run_gui(
         # user has already switched away, which used to leave the panels showing
         # one server's data under another server's name.
         refresh_guard = RefreshGuard()
+        # Last-painted fingerprints: skip rebuilding GPU / activity cards when
+        # nothing rendered has changed. Reset on host switch and repaint_all.
+        gpu_fp: dict[str, Any] = {"value": None}
+        activity_fp: dict[str, Any] = {"value": None}
         library_host = ft.Column(
             [ft.Text("Waiting for first poll…", size=12, color=PALETTE["muted"])],
             spacing=8,
@@ -428,8 +662,8 @@ def run_gui(
                 if push:
                     try:
                         charts_subtitle_text.update()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _warn_once("charts:subtitle", exc)
                 return
             srv = get_server_cfg()
             live_charts.refresh(
@@ -473,19 +707,25 @@ def run_gui(
             poll_state["live_gpus_server"] = target
             return True
 
+        def paint_gpu_cards(gpus: list[dict[str, Any]] | None) -> None:
+            """Rebuild GPU cards only when the displayed values changed."""
+            fp = gpu_fingerprint(gpus)
+            if fp == gpu_fp["value"]:
+                return
+            gpu_fp["value"] = fp
+            gpu_host.controls = [gpu_table(gpu) for gpu in gpus or []]
+
         def paint_live_gpu_cards() -> None:
             gpus = poll_state.get("live_gpus")
             if gpus is None or nav_state["index"] != 0:
                 return
             if poll_state.get("live_gpus_server") != get_server_cfg().name:
                 return
-            gpu_host.controls.clear()
-            for gpu in gpus:
-                gpu_host.controls.append(gpu_table(gpu))
+            paint_gpu_cards(gpus)
             try:
                 gpu_host.update()
-            except Exception:
-                pass
+            except Exception as exc:
+                _warn_once("paint_live_gpu_cards", exc)
 
         def on_chart_window(e) -> None:
             sel = e.control.selected
@@ -504,22 +744,20 @@ def run_gui(
             while True:
                 await asyncio.sleep(LIVE_GPU_INTERVAL_S)
                 try:
+                    # Sampling keeps running while hidden — only the paints
+                    # are gated, so the metrics store has no gap on resume.
                     srv = get_server_cfg()
                     if srv.local_gpu and poll_state.get("reachable", True):
                         ingested = await asyncio.to_thread(ingest_live_gpu_metrics)
-                        if ingested:
+                        if ingested and not paint_blocked():
                             paint_live_gpu_cards()
                     # Always refresh chart shapes from the store (covers full-poll
                     # ingest too) so the Charts tab moves without a range click.
-                    update_charts(push=True)
-                    update_poll_footer()
-                    try:
-                        freshness_host.update()
-                        poll_footer.update()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                    # The freshness footer is owned by the 1 Hz footer tick.
+                    if not paint_blocked():
+                        update_charts(push=True)
+                except Exception as exc:
+                    _warn_once("charts_live_loop", exc)
 
         chart_window_pick = ft.SegmentedButton(
             selected=["300"],
@@ -531,7 +769,7 @@ def run_gui(
             on_change=on_chart_window,
         )
 
-        def update_poll_footer(now: float | None = None) -> None:
+        def update_poll_footer(now: float | None = None) -> bool:
             tick = now if now is not None else time.time()
             level, label = format_freshness_line(
                 poll_state.get("polled_ts"),
@@ -544,28 +782,43 @@ def run_gui(
                 label = label.replace("Unreachable", "Offline (optional)", 1)
                 if level == "stale":
                     level = "aging"
-            freshness_host.content = freshness_banner(
-                level=level,
-                label=label,
-                interval_s=cfg.poll_interval,
-            )
+            # Mutate the persistent banner in place — no remount per tick.
+            changed = live_freshness.set(level, label)
             # Keep a quiet footer line for scroll-to-bottom context.
             if level == "stale":
-                poll_footer.value = label
-                poll_footer.color = PALETTE["stale"] if poll_state.get("reachable", True) else (
+                value = label
+                color = PALETTE["stale"] if poll_state.get("reachable", True) else (
                     PALETTE["warn"] if poll_state.get("optional") else PALETTE["alarm"]
                 )
             elif level == "aging":
-                poll_footer.value = label
-                poll_footer.color = PALETTE["warn"]
+                value = label
+                color = PALETTE["warn"]
             else:
-                poll_footer.value = label
-                poll_footer.color = PALETTE["muted"]
+                value = label
+                color = PALETTE["muted"]
+            if poll_footer.value != value or poll_footer.color != color:
+                poll_footer.value = value
+                poll_footer.color = color
+                changed = True
+            return changed
 
-        def paint_activity(act) -> None:
-            card = activity_card(act)
-            activity_host.content = card
-            poll_state["live_ts"] = time.time()
+        def paint_activity(act) -> bool:
+            """Rebuild the activity card only when what it renders changed.
+
+            Returns whether the content changed, so callers can skip the
+            update entirely on an idle server.
+            """
+            if act is None:
+                changed = activity_host.content is not None
+                activity_host.content = None
+                activity_fp["value"] = None
+                return changed
+            fp = activity_fingerprint(act)
+            if fp == activity_fp["value"]:
+                return False
+            activity_fp["value"] = fp
+            activity_host.content = activity_card(act)
+            return True
 
         def rebuild_live_activity() -> bool:
             """Cheap status refresh: re-read server.log / peers without a full poll."""
@@ -583,7 +836,19 @@ def run_gui(
                 peer_names=build_peer_name_map(load_client_config(cfg.client_config)),
                 listen_port=listen_port_from_url(srv.url),
             )
-            paint_activity(act)
+            if act is not None:
+                poll_state["live_ts"] = time.time()
+
+            def paint() -> None:
+                if paint_blocked():
+                    return
+                # Scoped diff of the one host this tick can change; skipped
+                # entirely while the fingerprint says nothing rendered moved.
+                if paint_activity(act):
+                    page.update(activity_host)
+
+            ui_call(paint)
+            # Tray is pystray, not Flet — stays on this worker thread.
             icon = tray_icon.get("icon")
             if icon is not None:
                 from ollama_sentinel.tray import update_tray
@@ -597,13 +862,18 @@ def run_gui(
                         summary=act.summary,
                         server=srv.name,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _warn_once("tray:update", exc)
             return True
 
         def _close_dialog(dlg: ft.AlertDialog) -> None:
-            dlg.open = False
-            page.update()
+            # pop_dialog removes it from the dialog stack; the old
+            # overlay.append + open=False path leaked one overlay entry per
+            # confirmation.
+            try:
+                page.pop_dialog()
+            except Exception as exc:
+                _warn_once("dialog:close", exc)
 
         def _confirm_dialog(title: str, message: str, on_confirm) -> None:
             def cancel(e) -> None:
@@ -623,25 +893,31 @@ def run_gui(
                 ],
                 actions_alignment=ft.MainAxisAlignment.END,
             )
-            page.overlay.append(dlg)
-            dlg.open = True
-            page.update()
+            page.show_dialog(dlg)
 
         def _run_unload(model_names: list[str]) -> None:
             srv = get_server_cfg()
             label = model_names[0] if len(model_names) == 1 else f"{len(model_names)} models"
-            unload_status.value = f"Unloading {label}…"
-            page.update()
+
+            def paint_start() -> None:
+                unload_status.value = f"Unloading {label}…"
+                page.update()
+
+            ui_call(paint_start)
 
             def worker() -> None:
                 results = unload_models(srv.url, model_names)
                 errors = [r for r in results if r.get("error")]
-                if errors:
-                    unload_status.value = errors[0]["error"]
-                else:
-                    unload_status.value = f"Unloaded {label}"
-                page.update()
-                refresh()
+
+                def paint_done() -> None:
+                    if errors:
+                        unload_status.value = errors[0]["error"]
+                    else:
+                        unload_status.value = f"Unloaded {label}"
+                    page.update()
+
+                ui_call(paint_done)
+                kick_refresh()
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -674,6 +950,14 @@ def run_gui(
             )
 
         def refresh(_=None) -> None:
+            """Full poll of the selected server.
+
+            Runs on a worker thread (HTTP, nvidia-smi, registry, /api/show).
+            Everything that touches a mounted control is done inside paint
+            closures handed to ui_call(..., wait=True), which marshal them
+            onto the Flet event loop — worker-thread patching of the control
+            tree is what blanked the window after days of uptime.
+            """
             srv = get_server_cfg()
             my_seq = refresh_guard.issue()
             target = [
@@ -714,41 +998,84 @@ def run_gui(
             if not refresh_guard.accept(my_seq, srv.name, current_server.value):
                 return
 
+            # ---- compute on this worker thread; no mounted control is touched ----
+            now = time.time()
+            reachable = bool(snap.get("reachable"))
+            disposition = unreachable_hold.record(srv.name, reachable, now)
+
+            if disposition == "hold":
+                host_online[srv.name] = False
+                if metrics_store is not None:
+                    metrics_store.ingest_snapshot(snap)
+
+                state = load_state(cfg.state_file)
+                active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
+                save_state(cfg.state_file, new_state)
+
+                last_good = unreachable_hold.last_good_ts(srv.name)
+                poll_state["polled_ts"] = last_good
+                poll_state["stale"] = bool(snap.get("stale"))
+                poll_state["reachable"] = False
+                poll_state["optional"] = bool(snap.get("optional"))
+                poll_state["alarms"] = list(active)
+                poll_state["live_ts"] = None
+
+                icon = tray_icon.get("icon")
+                if icon is not None:
+                    from ollama_sentinel.tray import update_tray
+
+                    try:
+                        update_tray(
+                            icon,
+                            reachable=False,
+                            alarms=active,
+                            phase=None,
+                            summary=snap.get("error"),
+                            server=srv.name,
+                        )
+                    except Exception as exc:
+                        _warn_once("tray:update", exc)
+
+                def paint_hold() -> None:
+                    if not refresh_guard.still_current(my_seq, srv.name, current_server.value):
+                        return
+                    if paint_blocked():
+                        return
+                    rebuild_server_options()
+                    host_banner.value = host_context_line(srv.name, srv.url, loading=False)
+                    host_banner.color = PALETTE["warn"]
+                    update_poll_footer(now)
+                    unload_all_btn.disabled = True
+                    page.update()
+
+                ui_call(paint_hold, wait=True)
+                return
+
             last_snap.clear()
             last_snap.update(snap)
-            reachable = bool(snap.get("reachable"))
             host_online[srv.name] = reachable
-            rebuild_server_options()
 
-            host_banner.value = host_context_line(srv.name, srv.url, loading=False)
-            host_banner.color = PALETTE["ok"] if reachable else (
-                PALETTE["warn"] if snap.get("optional") else PALETTE["alarm"]
-            )
+            if not reachable:
+                last_advisories.clear()
+                last_show_by_model.clear()
+                last_doctor_alarms.clear()
+                last_advisor_alarms.clear()
 
             if metrics_store is not None:
                 metrics_store.ingest_snapshot(snap)
 
             state = load_state(cfg.state_file)
-            active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
-
-            # Advisor /api/show is deferred until after Status paints — a remote
-            # library of ~20 models used to block the whole switch for seconds
-            # (or ~30s on a hung show). Status only needs /api/ps + /api/tags.
-            show_by_model: dict[str, dict[str, Any]] = {}
-            last_advisories.clear()
-
-            # Doctor (registry + nvidia-smi CUDA probe) runs after Status paints —
-            # it was blocking the first frame of every refresh on the local host.
-            doctor_alarms: list[dict[str, Any]] = []
-            doctor_status.value = ""
-            doctor_status.color = PALETTE["muted"]
-
+            base_active, new_state, _ = evaluate_alarms(snap, state, cfg.thresholds)
+            active_all = compose_active_alarms(
+                base_active, last_doctor_alarms, last_advisor_alarms
+            )
+            new_state.active_ids = {
+                a["id"] for a in active_all if isinstance(a, dict) and "id" in a
+            }
             save_state(cfg.state_file, new_state)
 
-            advisor_status.content = None
-
-            update_status_line.value = ""
-            update_status_line.color = PALETTE["muted"]
+            update_text = ""
+            update_key = "muted"
             if srv.local_gpu:
                 try:
                     from ollama_sentinel.ollama_update import (
@@ -775,49 +1102,28 @@ def run_gui(
                                 enabled=True,
                                 idle_seconds=idle_seconds,
                             )
-                        text, key = format_update_status_line(
+                        update_text, update_key = format_update_status_line(
                             pending=st.pending,
                             summary=st.summary,
                             auto_apply=auto,
                             started=started,
                             reason=reason,
                         )
-                        update_status_line.value = text
-                        update_status_line.color = PALETTE[key]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _warn_once("refresh:update_status", exc)
 
-            now = time.time()
-            polled_ts = snap.get("polled_at_ts")
-            poll_state["polled_ts"] = polled_ts
+            if reachable:
+                poll_state["polled_ts"] = snap.get("polled_at_ts")
+            else:
+                last_good = unreachable_hold.last_good_ts(srv.name)
+                poll_state["polled_ts"] = (
+                    last_good if last_good is not None else snap.get("polled_at_ts")
+                )
             poll_state["stale"] = bool(snap.get("stale"))
             poll_state["reachable"] = reachable
             poll_state["optional"] = bool(snap.get("optional"))
-            poll_state["alarms"] = list(active)
-            update_poll_footer(now)
+            poll_state["alarms"] = list(active_all)
 
-            alarm_host.content = alarm_banner(
-                reachable,
-                active,
-                error=snap.get("error"),
-                optional=bool(snap.get("optional")),
-            )
-
-            gpu_host.controls.clear()
-            for gpu in snap.get("gpus") or []:
-                gpu_host.controls.append(gpu_table(gpu))
-
-            models_host.controls.clear()
-            if reachable:
-                models_card = loaded_models_table(
-                    snap.get("models") or [],
-                    server_url=srv.url,
-                    on_unload=request_unload,
-                )
-                if models_card is not None:
-                    models_host.controls.append(models_card)
-
-            activity_host.content = None
             act = None
             if reachable and srv.local_gpu:
                 proc_rows = None
@@ -829,10 +1135,11 @@ def run_gui(
                     peer_names=build_peer_name_map(load_client_config(cfg.client_config)),
                     listen_port=listen_port_from_url(srv.url),
                 )
-                paint_activity(act)
+                poll_state["live_ts"] = now
             else:
                 poll_state["live_ts"] = None
 
+            # Tray is pystray, not Flet — stays on this worker thread.
             icon = tray_icon.get("icon")
             if icon is not None:
                 from ollama_sentinel.tray import update_tray
@@ -841,20 +1148,37 @@ def run_gui(
                     update_tray(
                         icon,
                         reachable=reachable,
-                        alarms=active,
+                        alarms=active_all,
                         phase=getattr(act, "phase", None) if act is not None else None,
                         summary=getattr(act, "summary", None) if act is not None else (
                             snap.get("error") if not reachable else None
                         ),
                         server=srv.name,
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _warn_once("tray:update", exc)
 
-            proc_vram_host.controls.clear()
+            # Controls are built detached (plain construction, safe off-loop)
+            # and mounted inside the paint closure.
+            alarm_ctrl = alarm_banner(
+                reachable,
+                active_all,
+                error=snap.get("error"),
+                optional=bool(snap.get("optional")),
+            )
+            models_card = (
+                loaded_models_table(
+                    snap.get("models") or [],
+                    server_url=srv.url,
+                    on_unload=request_unload,
+                )
+                if reachable
+                else None
+            )
+            proc_ctrl = None
             if proc_collector:
                 pv = proc_collector.get_snapshot()
-                # Always ingest local runner util for charts; only paint the
+                # Always ingest local runner util for charts; only build the
                 # table when the selected server is this machine.
                 if metrics_store is not None and pv.get("rows"):
                     metrics_store.ingest_proc_vram(
@@ -869,84 +1193,100 @@ def run_gui(
                         pv.get("stale")
                         or (pv_ts is not None and is_stale(pv_ts, cfg.proc_vram_interval, now))
                     )
-                    proc_vram_host.controls.append(
-                        process_vram_table(
-                            pv.get("rows") or [],
-                            stale=pv_stale,
-                            age_text=pv_age,
-                            error=pv.get("error"),
-                        )
+                    proc_ctrl = process_vram_table(
+                        pv.get("rows") or [],
+                        stale=pv_stale,
+                        age_text=pv_age,
+                        error=pv.get("error"),
                     )
 
-            library_host.controls.clear()
             if reachable:
                 inv = build_inventory(snap)
-                if show_by_model:
-                    inv = enrich_inventory_rows(inv, show_by_model)
+                if last_show_by_model:
+                    inv = enrich_inventory_rows(inv, last_show_by_model)
                 advisories_by_model = {
                     r["name"]: advisories_for_model(last_advisories, r["name"]) for r in inv
                 }
                 free_gb, free_pct = _free_vram_summary(snap.get("gpus"))
                 summary = inventory_summary(inv, free_vram_gb=free_gb, free_vram_pct=free_pct)
-                library_host.controls.append(
-                    section_card(
-                        "Library",
-                        library_table(
-                            inv,
-                            on_unload=request_unload,
-                            advisories_by_model=advisories_by_model if cfg.advisor else None,
-                        ),
-                        subtitle=summary,
-                    )
+                library_ctrl = section_card(
+                    "Library",
+                    library_table(
+                        inv,
+                        on_unload=request_unload,
+                        advisories_by_model=advisories_by_model if cfg.advisor else None,
+                    ),
+                    subtitle=summary,
                 )
             else:
                 err = snap.get("error") or "Ollama is not reachable"
                 subtitle = "Optional host — offline is normal" if srv.optional else None
-                library_host.controls.append(
-                    section_card(
-                        "Library",
-                        ft.Column(
-                            [
-                                ft.Text(err, size=12, color=PALETTE["alarm"] if not srv.optional else PALETTE["warn"]),
-                                ft.Text(
-                                    "Switch servers above or press Refresh when Ollama is back.",
-                                    size=11,
-                                    color=PALETTE["muted"],
-                                ),
-                            ],
-                            spacing=4,
-                        ),
-                        subtitle=subtitle,
-                    )
+                library_ctrl = section_card(
+                    "Library",
+                    ft.Column(
+                        [
+                            ft.Text(err, size=12, color=PALETTE["alarm"] if not srv.optional else PALETTE["warn"]),
+                            ft.Text(
+                                "Switch servers above or press Refresh when Ollama is back.",
+                                size=11,
+                                color=PALETTE["muted"],
+                            ),
+                        ],
+                        spacing=4,
+                    ),
+                    subtitle=subtitle,
                 )
 
-            unload_all_btn.disabled = not reachable or not bool(snap.get("models"))
+            unload_disabled = not reachable or not bool(snap.get("models"))
 
+            gaming_text = ""
+            gaming_color = PALETTE["muted"]
             if gaming_watcher and show_local_process_panels(srv.local_gpu):
                 gst = gaming_watcher.get_status()
                 mode = "yield on" if cfg.gaming_yield else "observe"
-                gaming_status.value = f"Gaming: {gst.get('status', 'idle')} ({mode})"
+                gaming_text = f"Gaming: {gst.get('status', 'idle')} ({mode})"
                 if gst.get("status") == "yielded":
-                    gaming_status.color = PALETTE["warn"]
+                    gaming_color = PALETTE["warn"]
                 elif gst.get("status") == "detected":
-                    gaming_status.color = PALETTE["ok"]
-                else:
-                    gaming_status.color = PALETTE["muted"]
-            else:
-                gaming_status.value = ""
+                    gaming_color = PALETTE["ok"]
 
-            # Canvas must be painted on the Flet event loop (worker-thread
-            # canvas.update is a no-op / silently fails).
-            async def _paint_charts() -> None:
+            gpus = snap.get("gpus")
+
+            # ---- paint 1: main status (on the event loop) ----
+            def paint_main() -> None:
+                if not refresh_guard.still_current(my_seq, srv.name, current_server.value):
+                    return
+                if paint_blocked():
+                    return
+                rebuild_server_options()
+                host_banner.value = host_context_line(srv.name, srv.url, loading=False)
+                host_banner.color = PALETTE["ok"] if reachable else (
+                    PALETTE["warn"] if snap.get("optional") else PALETTE["alarm"]
+                )
+                update_poll_footer(now)
+                alarm_host.content = alarm_ctrl
+                paint_gpu_cards(gpus)
+                models_host.controls = [models_card] if models_card is not None else []
+                paint_activity(act)
+                proc_vram_host.controls = [proc_ctrl] if proc_ctrl is not None else []
+                library_host.controls = [library_ctrl]
+                unload_all_btn.disabled = unload_disabled
+                gaming_status.value = gaming_text
+                gaming_status.color = gaming_color
+                if not reachable:
+                    doctor_status.value = ""
+                    doctor_status.color = PALETTE["muted"]
+                    advisor_status.content = None
+                update_status_line.value = update_text
+                update_status_line.color = PALETTE[update_key]
+                # Canvas must be painted on the Flet event loop (worker-thread
+                # canvas.update is a no-op / silently fails).
                 update_charts(push=True)
+                page.update()
 
-            try:
-                page.run_task(_paint_charts)
-            except Exception:
-                pass
-            page.update()
+            ui_call(paint_main, wait=True)
 
-            # Doctor after first paint (local host only).
+            # ---- doctor after first paint (local host only, worker I/O) ----
             if (
                 reachable
                 and srv.local_gpu
@@ -976,27 +1316,49 @@ def run_gui(
                         driver_cuda=inputs.get("driver_cuda"),
                     )
                     doctor_alarms = evaluate_doctor_alarms(findings)
-                    if doctor_alarms:
-                        active = list(active) + doctor_alarms
-                        new_state.active_ids = {a["id"] for a in active}
-                        save_state(cfg.state_file, new_state)
-                        alarm_host.content = alarm_banner(
-                            reachable,
-                            active,
-                            error=snap.get("error"),
-                            optional=bool(snap.get("optional")),
-                        )
-                        n = len(doctor_alarms)
-                        doctor_status.value = (
-                            f"Doctor: {n} warning"
-                            f"{'s' if n != 1 else ''} — run ollama-sentinel doctor"
-                        )
-                        doctor_status.color = PALETTE["warn"]
-                    page.update()
-                except Exception:
-                    pass
+                    last_doctor_alarms.clear()
+                    last_doctor_alarms.extend(doctor_alarms)
+                    active_all = compose_active_alarms(
+                        base_active, last_doctor_alarms, last_advisor_alarms
+                    )
+                    new_state.active_ids = {
+                        a["id"] for a in active_all if isinstance(a, dict) and "id" in a
+                    }
+                    save_state(cfg.state_file, new_state)
+                    poll_state["alarms"] = list(active_all)
 
-            # Second pass: enrich Library / advisor without blocking Status.
+                    doctor_ctrl = alarm_banner(
+                        reachable,
+                        active_all,
+                        error=snap.get("error"),
+                        optional=bool(snap.get("optional")),
+                    )
+                    n = len(doctor_alarms)
+                    doctor_text = (
+                        f"Doctor: {n} warning"
+                        f"{'s' if n != 1 else ''} — run ollama-sentinel doctor"
+                        if doctor_alarms
+                        else ""
+                    )
+                    doctor_color = PALETTE["warn"] if doctor_alarms else PALETTE["muted"]
+
+                    def paint_doctor() -> None:
+                        if not refresh_guard.still_current(
+                            my_seq, srv.name, current_server.value
+                        ):
+                            return
+                        if paint_blocked():
+                            return
+                        alarm_host.content = doctor_ctrl
+                        doctor_status.value = doctor_text
+                        doctor_status.color = doctor_color
+                        page.update()
+
+                    ui_call(paint_doctor, wait=True)
+                except Exception as exc:
+                    _warn_once("refresh:doctor", exc)
+
+            # ---- second pass: enrich Library / advisor (worker I/O) ----
             if (
                 cfg.advisor
                 and show_cache is not None
@@ -1036,25 +1398,35 @@ def run_gui(
                         client_missing=client_missing or None,
                         gpu_data_available=bool(snap.get("gpu_data_available")),
                     )
+                    last_show_by_model.clear()
+                    last_show_by_model.update(show_by_model)
                     last_advisories.clear()
                     last_advisories.extend(advisor_findings)
                     advisor_alarms = evaluate_advisor_alarms(advisor_findings)
-                    if advisor_alarms:
-                        active = list(active) + advisor_alarms
-                        new_state.active_ids = {a["id"] for a in active}
-                        save_state(cfg.state_file, new_state)
-                        alarm_host.content = alarm_banner(
-                            reachable,
-                            active,
-                            error=snap.get("error"),
-                            optional=bool(snap.get("optional")),
-                        )
+                    last_advisor_alarms.clear()
+                    last_advisor_alarms.extend(advisor_alarms)
 
-                    advisor_status.content = advisor_panel(last_advisories)
+                    active_all = compose_active_alarms(
+                        base_active, last_doctor_alarms, last_advisor_alarms
+                    )
+                    new_state.active_ids = {
+                        a["id"] for a in active_all if isinstance(a, dict) and "id" in a
+                    }
+                    save_state(cfg.state_file, new_state)
+                    poll_state["alarms"] = list(active_all)
+
+                    advisor_alarm_ctrl = alarm_banner(
+                        reachable,
+                        active_all,
+                        error=snap.get("error"),
+                        optional=bool(snap.get("optional")),
+                    )
+
+                    advisor_ctrl = advisor_panel(last_advisories)
 
                     inv = build_inventory(snap)
-                    if show_by_model:
-                        inv = enrich_inventory_rows(inv, show_by_model)
+                    if last_show_by_model:
+                        inv = enrich_inventory_rows(inv, last_show_by_model)
                     advisories_by_model = {
                         r["name"]: advisories_for_model(last_advisories, r["name"])
                         for r in inv
@@ -1063,39 +1435,65 @@ def run_gui(
                     summary = inventory_summary(
                         inv, free_vram_gb=free_gb, free_vram_pct=free_pct
                     )
-                    library_host.controls = [
-                        section_card(
-                            "Library",
-                            library_table(
-                                inv,
-                                on_unload=request_unload,
-                                advisories_by_model=advisories_by_model,
-                            ),
-                            subtitle=summary,
-                        )
-                    ]
-                    page.update()
-                except Exception:
-                    pass
+                    library_ctrl = section_card(
+                        "Library",
+                        library_table(
+                            inv,
+                            on_unload=request_unload,
+                            advisories_by_model=advisories_by_model,
+                        ),
+                        subtitle=summary,
+                    )
+
+                    def paint_advisor() -> None:
+                        if not refresh_guard.still_current(
+                            my_seq, srv.name, current_server.value
+                        ):
+                            return
+                        if paint_blocked():
+                            return
+                        alarm_host.content = advisor_alarm_ctrl
+                        advisor_status.content = advisor_ctrl
+                        library_host.controls = [library_ctrl]
+                        page.update()
+
+                    ui_call(paint_advisor, wait=True)
+                except Exception as exc:
+                    _warn_once("refresh:advisor", exc)
 
         def request_pull(model_name: str) -> None:
             srv = get_server_cfg()
-            pull_status.value = f"Pulling {model_name}…"
-            page.update()
+
+            def paint_start() -> None:
+                pull_status.value = f"Pulling {model_name}…"
+                page.update()
+
+            ui_call(paint_start)
 
             def worker() -> None:
                 for ev in pull_model(srv.url, model_name):
                     if "error" in ev:
-                        pull_status.value = format_network_error(
-                            RuntimeError(ev["error"]), context="Pull"
-                        )
-                        page.update()
+                        text = format_network_error(RuntimeError(ev["error"]), context="Pull")
+
+                        def paint_error(text=text) -> None:
+                            pull_status.value = text
+                            page.update()
+
+                        ui_call(paint_error)
                         return
-                    pull_status.value = str(ev.get("status") or ev)
+
+                    def paint_progress(text=str(ev.get("status") or ev)) -> None:
+                        pull_status.value = text
+                        page.update()
+
+                    ui_call(paint_progress)
+
+                def paint_done() -> None:
+                    pull_status.value = f"Done: {model_name}"
                     page.update()
-                pull_status.value = f"Done: {model_name}"
-                page.update()
-                refresh()
+
+                ui_call(paint_done)
+                kick_refresh()
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1173,19 +1571,28 @@ def run_gui(
 
             def worker() -> None:
                 try:
-                    discover_state["detail_cache"][model_id] = fetch_model_bundle(
-                        model_id,
-                        token=cfg.hf_token,
-                    )
+                    bundle = fetch_model_bundle(model_id, token=cfg.hf_token)
+                    cache = discover_state["detail_cache"]
+                    cache[model_id] = bundle
                     discover_state["detail_errors"].pop(model_id, None)
+                    # Bounded: a long discover session must not accumulate
+                    # every README ever expanded.
+                    while len(cache) > _DETAIL_CACHE_MAX:
+                        oldest = next(iter(cache))
+                        cache.pop(oldest, None)
+                        discover_state["detail_errors"].pop(oldest, None)
                 except Exception as exc:
                     discover_state["detail_errors"][model_id] = format_network_error(
                         exc, context="Model details"
                     )
                 finally:
                     discover_state["detail_loading"].discard(model_id)
-                render_discover_results()
-                page.update()
+
+                def paint() -> None:
+                    render_discover_results()
+                    page.update()
+
+                ui_call(paint)
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1200,6 +1607,7 @@ def run_gui(
             page.update()
 
             def worker() -> None:
+                status_text = ""
                 try:
                     if len(query.strip()) >= 2:
                         results = search_models(
@@ -1214,15 +1622,20 @@ def run_gui(
                         return
                     discover_state["last_results"] = results
                     discover_state["search_error"] = None
-                    pull_status.value = f"{len(results)} result{'s' if len(results) != 1 else ''}"
+                    status_text = f"{len(results)} result{'s' if len(results) != 1 else ''}"
                 except Exception as exc:
                     if discover_state.get("search_gen") != gen:
                         return
                     discover_state["last_results"] = []
                     discover_state["search_error"] = format_network_error(exc, context="Discover")
-                    pull_status.value = "Search failed"
-                render_discover_results()
-                page.update()
+                    status_text = "Search failed"
+
+                def paint(status_text=status_text) -> None:
+                    pull_status.value = status_text
+                    render_discover_results()
+                    page.update()
+
+                ui_call(paint)
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1238,13 +1651,31 @@ def run_gui(
             disabled=True,
         )
 
+        refresh_flight = SingleFlight()
+
+        def refresh_worker() -> None:
+            """Coalescing single-flight: manual clicks, host switches and the
+            poll timer share one worker; requests arriving mid-run cause
+            exactly one rerun rather than stacking threads or being dropped.
+            """
+            while True:
+                if not refresh_flight.request():
+                    return  # a run is in flight and will pick up our request
+                try:
+                    refresh()
+                except Exception as exc:
+                    _warn_once("refresh", exc)
+                if not refresh_flight.finish():
+                    return
+
         def kick_refresh(_=None) -> None:
             """Never run refresh on the Flet event thread.
 
             refresh() does HTTP, nvidia-smi, registry reads and /api/show;
-            inline on_click froze the window. Same worker path as host switch.
+            inline on_click froze the window. Same worker path as host switch
+            and the poll timer.
             """
-            threading.Thread(target=refresh, daemon=True).start()
+            threading.Thread(target=refresh_worker, daemon=True).start()
 
         def probe_fleet_reachability() -> None:
             """Lightweight TCP check for every configured host (dropdown dots)."""
@@ -1259,13 +1690,20 @@ def run_gui(
                 with ThreadPoolExecutor(max_workers=min(8, max(1, len(servers)))) as pool:
                     for name, ok in pool.map(one, servers):
                         host_online[name] = ok
-            except Exception:
+            except Exception as exc:
+                _warn_once("fleet_probe", exc)
                 return
-            rebuild_server_options()
-            try:
-                current_server.update()
-            except Exception:
-                pass
+
+            def paint() -> None:
+                if paint_blocked():
+                    return
+                rebuild_server_options()
+                try:
+                    current_server.update()
+                except Exception as exc:
+                    _warn_once("fleet_probe:paint", exc)
+
+            ui_call(paint)
 
         def kick_fleet_probe() -> None:
             threading.Thread(target=probe_fleet_reachability, daemon=True).start()
@@ -1405,8 +1843,15 @@ def run_gui(
             # Kill in-flight polls so a late result cannot undo this blank.
             refresh_guard.invalidate()
             caption = loading_caption(name)
-            clear_switch_state(last_snap, poll_state)
-            last_advisories.clear()
+            clear_switch_state(
+                last_snap,
+                poll_state,
+                last_advisories,
+                last_show_by_model,
+                last_doctor_alarms,
+                last_advisor_alarms,
+                unreachable_hold,
+            )
 
             srv = next((s for s in servers if s.name == name), None)
             url = srv.url if srv else None
@@ -1438,13 +1883,11 @@ def run_gui(
                 ft.Text(caption, size=12, color=PALETTE["muted"])
             ]
             gpu_host.controls = []
+            gpu_fp["value"] = None
             proc_vram_host.controls = []
             activity_host.content = None
-            freshness_host.content = freshness_banner(
-                level="unknown",
-                label=caption,
-                interval_s=cfg.poll_interval,
-            )
+            activity_fp["value"] = None
+            live_freshness.set("unknown", caption)
             poll_state["live_ts"] = None
             poll_state["alarms"] = []
             poll_state["live_gpus"] = None
@@ -1492,10 +1935,10 @@ def run_gui(
                 charts_host.update()
                 charts_subtitle_text.update()
                 poll_footer.update()
-            except Exception:
-                pass
+            except Exception as exc:
+                _warn_once("on_server_change:blank", exc)
             page.update()
-            threading.Thread(target=refresh, daemon=True).start()
+            kick_refresh()
 
         # Flet 0.80+: Dropdown selection is on_select, not on_change (text typing).
         current_server.on_select = on_server_change
@@ -1512,6 +1955,36 @@ def run_gui(
             page.update()
 
         nav.on_change = on_nav
+
+        async def repaint_all() -> None:
+            """Rebuild the render tree from scratch — recovery path for a
+            window that comes back from hidden/minimized (or blanked).
+
+            Debounced to one pass per 2 s so a burst of SHOW/RESTORE/FOCUS
+            events cannot queue a repaint each. Height is only restored when
+            clearly collapsed (< 300) so a user-resized window is not stomped.
+            """
+            now = time.monotonic()
+            if now - repaint_gate["last"] < 2.0:
+                return
+            repaint_gate["last"] = now
+            ui_state["missed"] = False
+            height = page.window.height
+            if height is not None and height < 300:
+                page.window.width = 960
+                page.window.height = 640
+            # Force card rebuilds: fingerprints from before the repaint are
+            # meaningless for a freshly mounted tree.
+            gpu_fp["value"] = None
+            activity_fp["value"] = None
+            content_area.content = _page_column(pages[nav_state["index"]])
+            page.update()
+            # Every panel repaints from a fresh poll.
+            kick_refresh()
+
+        def request_repaint() -> None:
+            page.run_task(repaint_all)
+
         body = ft.Row([nav, ft.VerticalDivider(width=1), content_area], expand=True)
         page.add(body)
         kick_fleet_probe()
@@ -1524,9 +1997,11 @@ def run_gui(
                 time.sleep(cfg.poll_interval)
                 try:
                     kick_fleet_probe()
-                    refresh()
-                except Exception:
-                    pass
+                    # Through the single-flight path so the timer and a manual
+                    # Refresh / host switch never overlap.
+                    kick_refresh()
+                except Exception as exc:
+                    _warn_once("poll_loop", exc)
 
         def footer_tick_loop():
             while True:
@@ -1538,17 +2013,20 @@ def run_gui(
                     # (Flet event loop) so Canvas actually redraws.
                     try:
                         rebuild_live_activity()
-                    except Exception:
-                        pass
-                    update_poll_footer()
-                    try:
-                        freshness_host.update()
-                        activity_host.update()
-                        poll_footer.update()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                    except Exception as exc:
+                        _warn_once("footer_tick:activity", exc)
+
+                    def paint_footer() -> None:
+                        if paint_blocked():
+                            return
+                        # Scoped diff: the 1 Hz tick owns only the banner and
+                        # the footer line, and touches them only on change.
+                        if update_poll_footer():
+                            page.update(freshness_host, poll_footer)
+
+                    ui_call(paint_footer)
+                except Exception as exc:
+                    _warn_once("footer_tick", exc)
 
         def show_request_loop():
             while True:
@@ -1556,8 +2034,8 @@ def run_gui(
                 try:
                     if instance_lock and instance_lock.consume_show_request():
                         request_show_window()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _warn_once("show_request_loop", exc)
 
         threading.Thread(target=poll_loop, daemon=True).start()
         threading.Thread(target=footer_tick_loop, daemon=True).start()
@@ -1566,4 +2044,5 @@ def run_gui(
 
     icon_path = find_icon_asset()
     assets_dir = str(icon_path.parent.resolve()) if icon_path is not None else None
+    setup_gui_logging()
     ft.app(target=app, assets_dir=assets_dir)

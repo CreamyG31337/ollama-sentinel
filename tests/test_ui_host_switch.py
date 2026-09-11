@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
+from ollama_sentinel.panel_hold import UnreachableHold
 from ollama_sentinel.ui import (
     clear_switch_state,
+    compose_active_alarms,
     host_context_line,
     host_dropdown_label,
     host_dropdown_option,
@@ -72,6 +74,62 @@ class HostSwitchBlankTests(unittest.TestCase):
         self.assertFalse(poll_state["stale"])
         # reachable is left alone; footer_tick skips while polled_ts is None
         self.assertTrue(poll_state["reachable"])
+
+    def test_clear_switch_state_drops_held_data_and_resets_hold(self):
+        last_snap = {"server": "cr-desktop-3090", "models": [{"name": "qwen"}]}
+        poll_state = {"polled_ts": 1_700_000_000.0, "stale": True, "reachable": True}
+        last_advisories = ["advisory"]
+        last_show_by_model = {"qwen": {"quantization": "Q4_K_M"}}
+        last_doctor_alarms = [{"id": "doctor:1", "message": "warn"}]
+        last_advisor_alarms = [{"id": "advisor:1", "message": "warn"}]
+        hold = UnreachableHold()
+        hold.record("cr-desktop-3090", True, 1_700_000_000.0)
+
+        clear_switch_state(
+            last_snap,
+            poll_state,
+            last_advisories,
+            last_show_by_model,
+            last_doctor_alarms,
+            last_advisor_alarms,
+            hold,
+        )
+
+        self.assertEqual(last_snap, {})
+        self.assertEqual(last_advisories, [])
+        self.assertEqual(last_show_by_model, {})
+        self.assertEqual(last_doctor_alarms, [])
+        self.assertEqual(last_advisor_alarms, [])
+        self.assertIsNone(hold.last_good_ts("cr-desktop-3090"))
+
+
+class ComposeActiveAlarmsTests(unittest.TestCase):
+    def test_compose_concatenates_base_doctor_advisor_without_duplicate_ids(self):
+        base = [{"id": "spill:model", "message": "Spill"}]
+        doctor = [
+            {"id": "doctor:cuda", "message": "CUDA warning"},
+            {"id": "spill:model", "message": "Duplicate spill"},
+        ]
+        advisor = [
+            {"id": "advisor:ctx", "message": "Context warning"},
+            {"id": "doctor:cuda", "message": "Duplicate doctor"},
+        ]
+
+        composed = compose_active_alarms(base, doctor, advisor)
+        self.assertEqual(
+            composed,
+            [
+                {"id": "spill:model", "message": "Spill"},
+                {"id": "doctor:cuda", "message": "CUDA warning"},
+                {"id": "advisor:ctx", "message": "Context warning"},
+            ],
+        )
+
+    def test_compose_handles_none_and_empty(self):
+        self.assertEqual(compose_active_alarms(None), [])
+        self.assertEqual(compose_active_alarms([], [], []), [])
+        alarms = [{"id": "a", "val": 1}]
+        self.assertEqual(compose_active_alarms(alarms, None, None), alarms)
 
 
 class LocalProcessPanelGateTests(unittest.TestCase):

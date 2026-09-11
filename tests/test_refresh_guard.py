@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from ollama_sentinel.refresh_guard import RefreshGuard
+from ollama_sentinel.refresh_guard import RefreshGuard, SingleFlight
 
 
 class RefreshGuardTests(unittest.TestCase):
@@ -86,6 +86,63 @@ class RefreshGuardTests(unittest.TestCase):
         g.accept(seq, target="alpha", current="alpha")
         g.invalidate()
         self.assertFalse(g.still_current(seq, "alpha", "alpha"))
+
+
+class SingleFlightTests(unittest.TestCase):
+    def test_first_request_starts(self):
+        f = SingleFlight()
+        self.assertTrue(f.request())
+
+    def test_request_while_running_returns_false_and_causes_one_rerun(self):
+        f = SingleFlight()
+        self.assertTrue(f.request())
+        self.assertFalse(f.request())  # coalesced, not dropped
+        self.assertTrue(f.finish())    # exactly one rerun wanted
+        self.assertFalse(f.finish())   # and only one
+
+    def test_many_requests_during_a_run_coalesce_to_one_rerun(self):
+        f = SingleFlight()
+        self.assertTrue(f.request())
+        for _ in range(10):
+            self.assertFalse(f.request())
+        self.assertTrue(f.finish())
+        self.assertFalse(f.finish())
+
+    def test_finish_without_pending_releases(self):
+        f = SingleFlight()
+        self.assertTrue(f.request())
+        self.assertFalse(f.finish())
+        # A later request starts fresh rather than being swallowed.
+        self.assertTrue(f.request())
+
+    def test_request_after_release_starts_again(self):
+        f = SingleFlight()
+        f.request()
+        f.finish()
+        f.request()
+        f.finish()
+        self.assertTrue(f.request())
+
+    def test_concurrent_requests_yield_exactly_one_runner(self):
+        f = SingleFlight()
+        started = []
+        lock = threading.Lock()
+
+        def worker(n):
+            if f.request():
+                with lock:
+                    started.append(n)
+                # hammer requests while "running"
+                for _ in range(20):
+                    f.request()
+                f.finish()
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(started), 1, "exactly one thread may own the run")
 
 
 if __name__ == "__main__":
