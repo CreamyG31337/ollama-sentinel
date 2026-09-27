@@ -16,6 +16,7 @@ from ollama_sentinel.instance import InstanceLock
 from ollama_sentinel.inventory import build_inventory
 from ollama_sentinel.log import append_alarm_log
 from ollama_sentinel.notify import notify_transition
+from ollama_sentinel.spill_guard import make_spill_guard
 from ollama_sentinel.poll import poll_all
 from ollama_sentinel.proc_vram import ProcessVramCollector, query_process_vram
 from ollama_sentinel.telemetry import polled_at_iso
@@ -755,6 +756,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     renderer = LiveRenderer()
     metrics_store = make_metrics_store(cfg)
+    spill_guard = make_spill_guard(
+        cfg, selected_servers(cfg), notify_fn=notify_transition if args.toast else None
+    )
+    if spill_guard is not None:
+        spill_guard.start()
 
     def poll_fn():
         nonlocal state

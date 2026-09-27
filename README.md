@@ -135,6 +135,25 @@ Detection runs only in `--gui` (tray) — not in the 15-minute `--once` task. St
 
 This is an intentional exception to the original read-only stance; unload stays in `unload.py` + the gaming watcher.
 
+## Spill guard
+
+Ollama has no option to refuse a model that does not fit: it loads anyway, splits across VRAM and
+system RAM, and every request to it crawls. Sentinel is not in the request path, so it cannot stop
+the load — the spill guard catches it on the next poll and unloads it (`keep_alive: 0`). The client
+gets an error instead of a response that takes minutes.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SPILL_GUARD` | `0` | `1` unloads local models that loaded mostly onto the CPU (opt-in) |
+| `SPILL_GUARD_MIN_GPU_PCT` | `75` | Models with less than this share of their weights in VRAM are unloaded |
+
+- Only the `local_gpu` server is guarded; models on remote hosts are never unloaded.
+- A model must be below the threshold on two consecutive polls, so a runner caught mid-load is left alone.
+- Each unload is logged to `%LOCALAPPDATA%\ollama-sentinel\spill_guard.jsonl`, with at most one
+  notification per model every 10 minutes (a client that retries reloads the model each time).
+- Runs in `--gui` (tray) and the live console. Both settings are also on the GUI Settings page and
+  apply without a restart.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

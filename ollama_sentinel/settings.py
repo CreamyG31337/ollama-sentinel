@@ -116,6 +116,28 @@ SETTINGS: tuple[Setting, ...] = (
         section="Monitoring",
         config_attr="gaming_yield",
     ),
+    Setting(
+        key="spill_guard",
+        label="Unload models that do not fit",
+        help=(
+            "Evict a local model that loaded mostly onto the CPU. Ollama cannot refuse "
+            "the load, so the client gets an error instead of a crawl."
+        ),
+        default=False,
+        section="Monitoring",
+        config_attr="spill_guard",
+    ),
+    Setting(
+        key="spill_guard_min_gpu_pct",
+        label="Minimum share on the GPU (%)",
+        help="Models with less than this percentage of their weights in VRAM are unloaded.",
+        default=75,
+        section="Monitoring",
+        config_attr="spill_guard_min_gpu_pct",
+        kind="number",
+        minimum=10,
+        maximum=99,
+    ),
 )
 
 BY_KEY: dict[str, Setting] = {s.key: s for s in SETTINGS}

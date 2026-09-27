@@ -44,6 +44,8 @@ class AppConfig:
     gaming_yield_min_vram_mb: int = 1536
     gaming_yield_min_util: float = 50.0
     gaming_yield_busy_util: float = 20.0
+    spill_guard: bool = False
+    spill_guard_min_gpu_pct: float = 75.0
     metrics: bool = True
     metrics_history_sec: float = 3600.0
     metrics_max_samples: int = 720
@@ -118,6 +120,7 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
     yield_raw = env.get("GAMING_YIELD", "0")
     observe_raw = env.get("GAMING_YIELD_OBSERVE", "1")
     metrics_raw = env.get("METRICS", "1")
+    spill_guard_raw = env.get("SPILL_GUARD", "0")
     metrics_log_raw = env.get("METRICS_LOG", "").strip()
     advisor_raw = env.get("ADVISOR", "1")
     client_cfg_raw = env.get("CLIENT_CONFIG", "").strip()
@@ -137,6 +140,8 @@ def config_from_env(env: dict[str, str]) -> AppConfig:
         gaming_yield_min_vram_mb=int(env.get("GAMING_YIELD_MIN_VRAM_MB", 1536)),
         gaming_yield_min_util=float(env.get("GAMING_YIELD_MIN_UTIL", 50)),
         gaming_yield_busy_util=float(env.get("GAMING_YIELD_BUSY_UTIL", 20)),
+        spill_guard=spill_guard_raw not in ("0", "false", "False", "no"),
+        spill_guard_min_gpu_pct=float(env.get("SPILL_GUARD_MIN_GPU_PCT", 75)),
         metrics=metrics_raw not in ("0", "false", "False", "no"),
         metrics_history_sec=float(env.get("METRICS_HISTORY_SEC", 3600)),
         metrics_max_samples=int(env.get("METRICS_MAX_SAMPLES", 720)),

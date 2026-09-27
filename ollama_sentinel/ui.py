@@ -57,6 +57,8 @@ from ollama_sentinel.telemetry import (
 )
 from ollama_sentinel.gaming import parse_exclude_list
 from ollama_sentinel.gaming_yield import GamingYieldWatcher
+from ollama_sentinel.notify import notify_transition
+from ollama_sentinel.spill_guard import make_spill_guard
 from ollama_sentinel.tray import find_icon_asset
 from ollama_sentinel.ui_charts import charts_subtitle, build_live_charts_panel
 from ollama_sentinel.settings import apply_to_config, effective, load_settings, set_setting
@@ -548,6 +550,10 @@ def run_gui(
                 list_loaded_models=_list_loaded,
             )
             gaming_watcher.start()
+
+        spill_guard = make_spill_guard(cfg, servers, notify_fn=notify_transition)
+        if spill_guard is not None:
+            spill_guard.start()
 
         server_names = [s.name for s in servers]
         # None = not probed yet; updated by fleet TCP probe + selected-host poll.
@@ -1366,9 +1372,10 @@ def run_gui(
                 and refresh_guard.still_current(my_seq, srv.name, current_server.value)
             ):
                 try:
+                    # load_client_config comes from the module import: re-importing it
+                    # here made it local to refresh() and broke its earlier use.
                     from ollama_sentinel.client_config import (
                         installed_model_names,
-                        load_client_config,
                         missing_client_models,
                     )
 
